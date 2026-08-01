@@ -168,3 +168,7 @@ debugging time; none of them fail in a way that points at the cause.
   really an HTTP one. `nginx.service.d/logdir.conf` recreates it; it resets
   `ExecStartPre=` first because drop-ins *append* to that list, and appending
   alone would still run the failing test first.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
