@@ -1,0 +1,61 @@
+#!ipxe
+# pxe-description: Proxmox VE 9.2-1 installer
+# pxe-payload-dir: pve
+
+# Proxmox VE 9.2-1 network installer - served by @@SERVER_NAME@@ (@@SERVER_IP@@).
+#
+# Kernel command lines below are copied from the ISO's own boot/grub/grub.cfg,
+# so they match what you would get booting the ISO directly. `proxtui` selects
+# the terminal (text) installer; without it you get the graphical one.
+
+set base-url http://@@SERVER_IP@@
+set kbase ro ramdisk_size=16777216 rw quiet splash=silent
+
+:start
+menu Proxmox VE 9.2-1  --  network installer (@@SERVER_NAME@@)
+item --gap --                 Install
+item tui                      Terminal UI  (text mode)      [default]
+item gui                      Graphical
+item tui-nomodeset            Terminal UI, nomodeset  (no/odd GPU)
+item tui-debug                Terminal UI, debug mode
+item --gap --                 Other
+item shell                    iPXE shell
+choose --timeout 10000 --default tui selected || goto tui
+goto ${selected}
+
+:tui
+set kopts ${kbase} proxtui
+goto load
+
+:gui
+set kopts ${kbase}
+goto load
+
+:tui-nomodeset
+set kopts ${kbase} proxtui nomodeset
+goto load
+
+:tui-debug
+set kopts ro ramdisk_size=16777216 rw splash=verbose proxdebug proxtui
+goto load
+
+:load
+echo
+echo Loading Proxmox VE 9.2-1
+echo   cmdline : ${kopts}
+echo   client  : ${net0/mac}  ${ip}
+echo
+echo Fetching the kernel, then a 2 GB initrd (~20s on gigabit).
+echo
+kernel ${base-url}/pve/linux26 ${kopts} || goto failed
+initrd ${base-url}/pve/initrd || goto failed
+boot || goto failed
+
+:failed
+echo
+echo BOOT FAILED - dropping to an iPXE shell.
+echo Try:  imgfetch ${base-url}/pve/linux26
+echo
+
+:shell
+shell

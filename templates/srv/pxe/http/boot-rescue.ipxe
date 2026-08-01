@@ -1,0 +1,55 @@
+#!ipxe
+# pxe-description: SystemRescue 13.01 (rescue / hardware config)
+# pxe-payload-dir: sysresccd
+
+# SystemRescue 13.01 - full rescue / hardware-config environment.
+# Runs entirely in RAM. Nothing is installed and no disk is touched.
+# Ships ethtool, pciutils, dmidecode, smartmontools, nvme-cli, gparted,
+# tcpdump, and the rest - no package downloads needed.
+
+set base-url http://@@SERVER_IP@@
+set karch archisobasedir=sysresccd ip=dhcp archiso_http_srv=${base-url}/ checksum
+
+:start
+menu SystemRescue 13.01  --  rescue / config environment (@@SERVER_NAME@@)
+item --gap --                 Boot
+item ram                      Copy to RAM  (frees the server, needs ~2GB)   [default]
+item stream                   Stream from server  (less RAM, keeps network)
+item ram-nomodeset            Copy to RAM, nomodeset  (no/odd GPU)
+item --gap --                 Other
+item shell                    iPXE shell
+choose --timeout 10000 --default ram selected || goto ram
+goto ${selected}
+
+:ram
+set kopts ${karch} copytoram
+goto load
+
+:stream
+set kopts ${karch}
+goto load
+
+:ram-nomodeset
+set kopts ${karch} copytoram nomodeset
+goto load
+
+:load
+echo
+echo Loading SystemRescue 13.01
+echo   cmdline : ${kopts}
+echo   client  : ${net0/mac}  ${ip}
+echo
+kernel ${base-url}/sysresccd/boot/x86_64/vmlinuz ${kopts} || goto failed
+initrd ${base-url}/sysresccd/boot/intel_ucode.img                || goto failed
+initrd ${base-url}/sysresccd/boot/amd_ucode.img                  || goto failed
+initrd ${base-url}/sysresccd/boot/x86_64/sysresccd.img           || goto failed
+boot || goto failed
+
+:failed
+echo
+echo BOOT FAILED - dropping to an iPXE shell.
+echo Try:  imgfetch ${base-url}/sysresccd/boot/x86_64/vmlinuz
+echo
+
+:shell
+shell

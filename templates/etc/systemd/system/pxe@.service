@@ -1,0 +1,30 @@
+[Unit]
+Description=PXE boot server - payload: %i
+Documentation=https://github.com/MikeRzDev/pxe-server
+# %i is the payload (the image being served). A payload is any
+# /srv/pxe/http/boot-<name>.ipxe - the set is discovered at runtime, so
+# nothing here needs editing to add an image. `pxectl list` shows them.
+Wants=dnsmasq.service nginx.service
+After=network-online.target dnsmasq.service nginx.service
+
+# NOTE: deliberately no Conflicts= between instances, and no PartOf= drop-ins
+# on dnsmasq/nginx. Both can only name concrete instances, which is impossible
+# for a payload set discovered at runtime - and Conflicts= plus PartOf= makes
+# systemd reject the job outright:
+#   Transaction contains conflicting jobs 'restart' and 'stop' for dnsmasq
+# breaking `systemctl restart pxe@<payload>`. Mutual exclusion is enforced by
+# the `pxectl <payload>` verb; worker teardown by the `pxectl off` verb.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Fails the start if %i is not an installed payload, so a typo cannot leave
+# boot.ipxe pointing at the previous image.
+ExecStartPre=/usr/local/sbin/pxectl _mode %i
+ExecStart=/usr/local/sbin/pxectl _fw-open
+# Closes the firewall only. Stopping dnsmasq/nginx from here deadlocks (blocking)
+# or breaks `systemctl restart` (--no-block); `pxectl off` does it instead.
+ExecStop=/usr/local/sbin/pxectl _fw-close
+
+[Install]
+WantedBy=multi-user.target

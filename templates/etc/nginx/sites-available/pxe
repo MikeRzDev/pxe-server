@@ -1,0 +1,20 @@
+# Serves the PXE payload (kernel, 2 GB initrd, boot script) on the LAN only.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /srv/pxe/http;
+    autoindex on;
+
+    # Large sequential reads of a 2 GB initrd - let the kernel do the work.
+    sendfile on;
+    tcp_nopush on;
+    output_buffers 4 512k;
+
+    access_log /var/log/nginx/pxe-access.log;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

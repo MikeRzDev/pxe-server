@@ -1,0 +1,272 @@
+#!/bin/bash
+# pxectl - control the on-demand PXE boot server.
+#
+# ONE templated service, parameterised by the payload (the image being served):
+#
+#     systemctl start pxe@<name>
+#
+# The server is IMAGE-AGNOSTIC. A payload is simply a file
+#
+#     /srv/pxe/http/boot-<name>.ipxe
+#
+# so dropping in a new iPXE script is all it takes to add an image - there is
+# no registry to edit here, in the unit, or in the installer. `pxectl list`
+# shows whatever is currently present.
+#
+#     pxectl <name> | off | status | list | log
+#
+# Each boot script may describe itself with header comments, which is all the
+# metadata pxectl uses:
+#
+#     # pxe-description: Debian 13 netboot installer
+#     # pxe-payload-dir: debian13      (relative to /srv/pxe/http, for `status`)
+#
+# Payloads are mutually exclusive - boot.ipxe has one target at a time - and
+# that is enforced HERE, in the `pxectl <name>` verb, deliberately NOT with
+# Conflicts= in the unit. Conflicts= combined with PartOf= drop-ins on the
+# workers makes systemd reject the job with
+#   "Transaction contains conflicting jobs 'restart' and 'stop' for dnsmasq"
+# which breaks `systemctl restart pxe@<name>`.
+
+set -u
+
+LAN="@@LAN_CIDR@@"
+WWW="/srv/pxe/http"
+
+# port/proto|source|description
+#
+# 67 and 4011 MUST accept "any": a PXE client has no IP address yet when it
+# sends DHCPDISCOVER, so the packet is 0.0.0.0 -> 255.255.255.255 and can
+# never match a rule scoped to the LAN subnet. This silently broke the first
+# boot attempt on 2026-07-30.
+# 69 and 80 are contacted only after the router has given the client a lease,
+# so those stay scoped to the LAN.
+PORTS=(
+    "67/udp|any|proxy-DHCP (client has no IP yet)"
+    "4011/udp|any|proxy-DHCP (PXE re-request)"
+    "69/udp|$LAN|TFTP"
+    "80/tcp|$LAN|HTTP payload"
+)
+
+need_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "pxectl: must run as root (use sudo)" >&2
+        exit 1
+    fi
+}
+
+# Every boot-<name>.ipxe in $WWW is a payload. boot.ipxe itself is the symlink
+# to the active one and never matches this glob.
+payload_names() {
+    local f n
+    for f in "$WWW"/boot-*.ipxe; do
+        [ -e "$f" ] || continue
+        n="${f##*/boot-}"
+        n="${n%.ipxe}"
+        # Shipped as a starting point for new images, not bootable itself.
+        [ "$n" = "EXAMPLE" ] && continue
+        echo "$n"
+    done
+}
+
+payload_exists() { [ -f "$WWW/boot-$1.ipxe" ]; }
+
+# payload_meta <name> <key>  - reads a "# pxe-<key>: value" header comment
+payload_meta() {
+    sed -n "s/^#[[:space:]]*pxe-$2:[[:space:]]*//p" "$WWW/boot-$1.ipxe" 2>/dev/null | head -1
+}
+
+payload_desc() {
+    local d
+    d=$(payload_meta "$1" description)
+    echo "${d:-$1}"
+}
+
+# Which payload is boot.ipxe currently pointing at?
+active_mode() {
+    local target n
+    target=$(readlink "$WWW/boot.ipxe" 2>/dev/null) || { echo "none"; return; }
+    n="${target##boot-}"
+    n="${n%.ipxe}"
+    if [ -n "$n" ] && payload_exists "$n"; then echo "$n"; else echo "none"; fi
+}
+
+fw_open() {
+    local entry pp src desc
+    for entry in "${PORTS[@]}"; do
+        IFS="|" read -r pp src desc <<<"$entry"
+        if [ "$src" = "any" ]; then
+            ufw allow to any port "${pp%%/*}" proto "${pp##*/}" \
+                comment "PXE ${desc}" >/dev/null 2>&1
+        else
+            ufw allow from "$src" to any port "${pp%%/*}" proto "${pp##*/}" \
+                comment "PXE ${desc}" >/dev/null 2>&1
+        fi
+    done
+}
+
+fw_close() {
+    local entry pp src desc
+    for entry in "${PORTS[@]}"; do
+        IFS="|" read -r pp src desc <<<"$entry"
+        if [ "$src" = "any" ]; then
+            ufw delete allow to any port "${pp%%/*}" proto "${pp##*/}" >/dev/null 2>&1
+        else
+            ufw delete allow from "$src" to any port "${pp%%/*}" proto "${pp##*/}" \
+                >/dev/null 2>&1
+        fi
+    done
+}
+
+# Stop the shared workers. ONLY ever call this from outside a unit lifecycle -
+# that is, from the `off` verb, never from ExecStop. Two separate failures come
+# from getting this wrong, both found on 2026-08-01:
+#
+#   blocking `systemctl stop` in ExecStop  -> DEADLOCK. This unit's stop job is
+#     running; the stop jobs it requests sit "waiting" because systemd will not
+#     run them until the current job finishes; the current job is blocked on
+#     exactly those jobs. Hangs until the stop times out and the unit is killed
+#     and marked failed. Recover with `systemctl cancel <job-id>`.
+#
+#   `systemctl stop --no-block` in ExecStop -> RACE. It avoids the deadlock but
+#     breaks `systemctl restart pxe@x`: the restart's start jobs and the
+#     unblocked stop jobs land in one transaction, the stops win, and the unit
+#     comes back "active" with dnsmasq and nginx DEAD - PXE silently broken.
+#
+# So ExecStop closes the firewall and nothing else, and taking the workers down
+# is the `off` verb's job, where it is an ordinary blocking call in its own
+# transaction and neither failure applies.
+stop_workers() { systemctl stop dnsmasq.service nginx.service 2>/dev/null; }
+
+usage() {
+    echo "usage: pxectl {<payload>|off|status|list|log}" >&2
+    echo "       pxectl list   - show the payloads currently installed" >&2
+}
+
+case "${1:-status}" in
+
+# ---- internal verbs, called by pxe@.service. Not for interactive use ----
+_mode)
+    need_root
+    want="${2:-}"
+    if ! payload_exists "$want"; then
+        echo "pxectl _mode: no such payload '$want'" >&2
+        echo "pxectl _mode: expected $WWW/boot-$want.ipxe to exist" >&2
+        echo "pxectl _mode: installed: $(payload_names | paste -sd' ' -)" >&2
+        exit 1
+    fi
+    ln -sfn "boot-$want.ipxe" "$WWW/boot.ipxe"
+    echo "payload -> $(readlink "$WWW/boot.ipxe")"
+    ;;
+
+_fw-open)
+    need_root
+    fw_open
+    echo "PXE firewall rules opened"
+    ;;
+
+# Called from ExecStop. Closes the firewall and deliberately does NOT touch
+# dnsmasq/nginx - see the comment on stop_workers for the deadlock and the
+# restart race that doing so causes. After this, ports 67/4011/69/80 are shut
+# to the LAN, so a still-running dnsmasq is unreachable. `pxectl off` is what
+# actually stops the workers.
+_fw-close)
+    need_root
+    fw_close
+    echo "PXE firewall rules closed"
+    ;;
+
+off|stop)
+    need_root
+    for name in $(payload_names); do
+        systemctl stop "pxe@$name.service" 2>/dev/null
+    done
+    # Belt and braces. Starting pxe@<typo> fails in ExecStartPre, but its
+    # Wants= has already pulled dnsmasq and nginx up and no ExecStop ever runs
+    # to take them down again. Both are PXE-only on this host - dnsmasq runs
+    # with port=0 (no DNS) and nginx serves only the pxe site - so stopping
+    # them unconditionally is safe and makes "off" mean off.
+    stop_workers
+    fw_close
+    echo
+    echo "PXE is OFF. Nothing is listening; the LAN is untouched."
+    ;;
+
+list)
+    printf "%-14s %-9s %-8s %s\n" PAYLOAD STATE SIZE DESCRIPTION
+    for name in $(payload_names); do
+        dir=$(payload_meta "$name" payload-dir)
+        size="-"
+        [ -n "$dir" ] && [ -d "$WWW/$dir" ] && size=$(du -sh "$WWW/$dir" 2>/dev/null | cut -f1)
+        printf "%-14s %-9s %-8s %s\n" \
+            "$name" "$(systemctl is-active "pxe@$name" 2>/dev/null)" \
+            "$size" "$(payload_desc "$name")"
+    done
+    ;;
+
+status)
+    echo "PXE boot server"
+    echo "  serving  : $(active_mode)"
+    for name in $(payload_names); do
+        printf "  %-12s: %-10s (at boot: %s)\n" \
+            "pxe@$name" "$(systemctl is-active "pxe@$name" 2>/dev/null)" \
+            "$(systemctl is-enabled "pxe@$name" 2>/dev/null)"
+    done
+    for u in dnsmasq nginx; do
+        printf "  %-12s: %-10s (at boot: %s)\n" \
+            "$u" "$(systemctl is-active "$u" 2>/dev/null)" \
+            "$(systemctl is-enabled "$u" 2>/dev/null)"
+    done
+    echo "  payloads :"
+    for name in $(payload_names); do
+        dir=$(payload_meta "$name" payload-dir)
+        size=""
+        [ -n "$dir" ] && [ -d "$WWW/$dir" ] && size=$(du -sh "$WWW/$dir" 2>/dev/null | cut -f1)
+        printf "    %-12s %-7s %s\n" "$name" "${size:--}" "$(payload_desc "$name")"
+    done
+    echo "  listening:"
+    ss -tulnp 2>/dev/null | grep -E ":(67|69|80|4011)\s" \
+        | awk '{print "    " $1, $5}' || echo "    (nothing)"
+    echo "  firewall :"
+    ufw status 2>/dev/null | grep -i pxe | sed 's/^/    /' || echo "    (no PXE rules)"
+    ;;
+
+log)
+    echo "Following dnsmasq. Look for DHCPDISCOVER / PXE / TFTP lines. Ctrl-C to stop."
+    journalctl -u dnsmasq -f --no-pager
+    ;;
+
+-h|--help|help)
+    usage
+    exit 0
+    ;;
+
+*)
+    # Anything else is treated as a payload name.
+    want="$1"
+    if ! payload_exists "$want"; then
+        echo "pxectl: no such payload '$want'" >&2
+        echo "pxectl: installed: $(payload_names | paste -sd' ' -)" >&2
+        echo "pxectl: to add one, drop a boot-$want.ipxe into $WWW" >&2
+        exit 1
+    fi
+    need_root
+    # Stop any other payload FIRST, in its own transaction. Doing this here
+    # rather than via Conflicts= is what keeps `systemctl restart pxe@x` working.
+    for name in $(payload_names); do
+        [ "$name" = "$want" ] && continue
+        if systemctl is-active --quiet "pxe@$name.service" 2>/dev/null; then
+            echo "stopping pxe@$name (payloads are mutually exclusive)"
+            systemctl stop "pxe@$name.service"
+        fi
+    done
+    systemctl start "pxe@$want.service" || {
+        echo "pxectl: failed to start pxe@$want - see: systemctl status pxe@$want" >&2
+        exit 1
+    }
+    sleep 1
+    echo
+    echo "PXE is ON, serving: $(payload_desc "$want")"
+    echo "Boot the target from the network (UEFI PXE / IPv4)."
+    ;;
+esac

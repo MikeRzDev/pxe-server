@@ -1,0 +1,79 @@
+#!ipxe
+# pxe-description: EXAMPLE - copy this to add a new image
+# pxe-payload-dir: EXAMPLE
+#
+# Copy to boot-<name>.ipxe, edit, and it becomes a payload immediately:
+#
+#     sudo pxectl list          # it shows up here
+#     sudo pxectl <name>        # and is bootable here
+#
+# Nothing else needs editing - not pxectl, not pxe@.service, not install.sh.
+# The two "# pxe-" headers above are the only metadata; both are optional
+# (the description defaults to the payload name).
+#
+# Files usually go in /srv/pxe/http/<name>/, which is what pxe-payload-dir
+# points at so `pxectl status` can report its size. Fetch them with:
+#
+#     sudo ./payloads/fetch-iso.sh <name> <iso-url>
+#
+# ---------------------------------------------------------------------------
+# The kernel cmdline is the ONLY genuinely image-specific part. The server does
+# not care what you boot; it just serves files over TFTP and HTTP. Patterns for
+# the common families - check the distro's own isolinux/grub config for the
+# authoritative flags, they change between releases:
+#
+#   Debian / Ubuntu netboot installer
+#     kernel ${base-url}/<name>/linux
+#     initrd ${base-url}/<name>/initrd.gz
+#
+#   Ubuntu live server (subiquity)   - needs the squashfs URL
+#     kernel ${base-url}/<name>/vmlinuz
+#     initrd ${base-url}/<name>/initrd
+#     ... url=${base-url}/<name>/ubuntu.iso autoinstall ip=dhcp
+#
+#   Arch / SystemRescue (archiso)    - pulls its own squashfs over HTTP
+#     ... archisobasedir=<dir> archiso_http_srv=${base-url}/ ip=dhcp
+#
+#   Fedora / RHEL / Rocky (anaconda) - needs inst.repo
+#     ... inst.repo=${base-url}/<name>/ ip=dhcp
+#
+#   Anything that boots a full ISO from a ramdisk (like Proxmox)
+#     ... ramdisk_size=16777216
+#     and the ISO must be INSIDE the initrd - see payloads/build-proxmox.sh.
+#     Give the target enough RAM to hold the whole image.
+# ---------------------------------------------------------------------------
+
+set base-url http://@@SERVER_IP@@
+set kbase ip=dhcp
+
+:start
+menu EXAMPLE  --  network boot (@@SERVER_NAME@@)
+item --gap --                 Boot
+item default                  Default                          [default]
+item --gap --                 Other
+item shell                    iPXE shell
+choose --timeout 10000 --default default selected || goto default
+goto ${selected}
+
+:default
+set kopts ${kbase}
+goto load
+
+:load
+echo
+echo Loading EXAMPLE
+echo   cmdline : ${kopts}
+echo   client  : ${net0/mac}  ${ip}
+echo
+kernel ${base-url}/EXAMPLE/vmlinuz ${kopts} || goto failed
+initrd ${base-url}/EXAMPLE/initrd            || goto failed
+boot || goto failed
+
+:failed
+echo
+echo BOOT FAILED - dropping to an iPXE shell.
+echo Try:  imgfetch ${base-url}/EXAMPLE/vmlinuz
+echo
+
+:shell
+shell
