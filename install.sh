@@ -148,7 +148,7 @@ RUN systemctl disable --now nginx.service   2>/dev/null || true
 
 # ---------------------------------------------------------- 2 directories ----
 step "directories under $PXE_ROOT"
-for d in tftp http http/pve pve iso; do
+for d in tftp http iso; do
     RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_ROOT/$d"
 done
 # nginx logs live on a tmpfs on DietPi; the drop-in recreates this at start,

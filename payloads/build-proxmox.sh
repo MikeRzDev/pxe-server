@@ -21,7 +21,9 @@ PVE_VERSION="${1:-9.2-1}"
 PXE_ROOT="${PXE_ROOT:-/srv/pxe}"
 ISO_NAME="proxmox-ve_${PVE_VERSION}.iso"
 ISO_URL="${PVE_ISO_URL:-https://enterprise.proxmox.com/iso/${ISO_NAME}}"
-ISO_PATH="$PXE_ROOT/pve/$ISO_NAME"
+# All source ISOs live in one place, $PXE_ROOT/iso - same as build-rescue.sh
+# and fetch-iso.sh. Built payloads go under $PXE_ROOT/http/<name>/.
+ISO_PATH="$PXE_ROOT/iso/$ISO_NAME"
 # Build here, never /tmp - /tmp is a small tmpfs on DietPi and this needs ~4 GB.
 WORK="$PXE_ROOT/work"
 DEST="$PXE_ROOT/http/pve"
@@ -44,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-install -d "$PXE_ROOT/pve" "$DEST" "$MNT"
+install -d "$PXE_ROOT/iso" "$DEST" "$MNT"
 
 # ------------------------------------------------------------------ fetch ---
 if [ -f "$ISO_PATH" ]; then
