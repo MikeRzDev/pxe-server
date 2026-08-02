@@ -53,9 +53,21 @@ filter.ID_NET_NAME_MAC = "*"
 
 [disk-setup]
 filesystem = "ext4"             # ext4 | xfs | zfs | btrfs
-disk-list  = ["sda"]            # <-- VERIFY THIS. Wrong disk = wrong data gone.
 
-# ZFS example instead of the two lines above:
+# ext4 and xfs take exactly ONE disk. `disk-list = ["sda","nvme0n1"]` is
+# REJECTED ("make sure to define only one disk for ext4 and xfs"), so you
+# cannot list both names and let the absent one be skipped.
+#
+# A UDEV filter is resolved on the target instead, so this installs to
+# whatever the single disk is called - sda, nvme0n1, vda - with no need to
+# inspect the machine first:
+filter.DEVNAME = "*"
+
+# On a machine with MORE THAN ONE disk, "*" matches all of them and which one
+# an ext4 install picks is undocumented. Name it explicitly for those:
+# disk-list = ["nvme0n1"]       # <-- VERIFY. Wrong disk = wrong data gone.
+
+# ZFS spans several disks, so disk-list with more than one entry is fine there:
 # filesystem = "zfs"
 # zfs.raid   = "raid1"
 # disk-list  = ["sda", "sdb"]

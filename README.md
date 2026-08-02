@@ -152,13 +152,13 @@ installer if either is missing:
    (that's what `boot-proxmox-auto.ipxe` adds).
 
 ```bash
-# 1. describe the target
-cp payloads/answer.toml.example payloads/answer.toml   # gitignored
-$EDITOR payloads/answer.toml
-./payloads/prepare-auto-iso.sh --validate payloads/answer.toml
+# 1. describe the target - generates a 32-char root password, saves it to
+#    secrets/<name>.env FIRST, then writes and validates the answer file
+cp nodes.env.example nodes.env && $EDITOR nodes.env    # your LAN, gitignored
+./payloads/new-node.sh pve01                          # or --ip / --disk / --fs
 
 # 2. bake it in  (needs Docker; see the amd64 note below)
-./payloads/prepare-auto-iso.sh payloads/answer.toml /path/to/proxmox-ve_9.2-1.iso
+./payloads/prepare-auto-iso.sh nodes/pve01.answer.toml /path/to/proxmox-ve_9.2-1.iso
 
 # 3. build the payload on the PXE server
 scp proxmox-ve_9.2-1-auto.iso user@pxe:/srv/pxe/iso/
@@ -174,9 +174,28 @@ installed. `prepare-auto-iso.sh` therefore runs it inside a
 `--platform linux/amd64` container. It's emulated and takes a few minutes, but
 it's a one-off, and it does not have to run on the PXE server.
 
+`new-node.sh` allocates the next free address in the range from `nodes.env`
+(skipping anything that answers a ping or is already claimed), generates the
+password, and **writes it to `secrets/<name>.env` before doing anything else** —
+a random 32-character password that exists only as a hash is a password you
+have lost, along with the node it installs. `secrets/` and `nodes/` are
+gitignored.
+
 **Use `root-password-hashed`, not `root-password`.** The answer file ends up
 inside the ISO *and* inside the 2 GB initrd that this server hands out over
-plain HTTP to the whole LAN. Generate one with `openssl passwd -6`.
+plain HTTP to the whole LAN. `new-node.sh` always emits the hashed form.
+
+**Picking the disk without inspecting the machine.** ext4 and xfs accept
+exactly one disk, and `disk-list = ["sda","nvme0n1"]` is rejected outright — so
+you cannot list both names and let the absent one be skipped. A UDEV filter is
+resolved on the target instead, so the default `filter.DEVNAME = "*"` installs
+to whatever the single disk is called. On a machine with **more than one** disk
+that is ambiguous and undocumented; pin those with `--disk nvme0n1`.
+
+**`validate-answer` always exits 0**, even when it prints
+`Error: Found issues in the answer file.` Its exit status is useless, so
+`prepare-auto-iso.sh` matches its output instead — a script that trusts `$?`
+here will happily bake a broken answer file.
 
 If you would rather change the answer file without rebuilding a 2 GB initrd
 each time, `prepare-iso --fetch-from http` makes the installer fetch it at

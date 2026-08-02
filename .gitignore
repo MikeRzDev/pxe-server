@@ -75,3 +75,7 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+
+# Per-node output from new-node.sh: cleartext root passwords and the
+# answer files built from them. Never commit either.
+nodes/

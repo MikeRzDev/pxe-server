@@ -95,7 +95,17 @@ ANSWER_DIR="$(cd "$(dirname "$ANSWER")" && pwd)"
 ANSWER_FILE="$(basename "$ANSWER")"
 
 echo "==> validating $ANSWER"
-run "$ANSWER_DIR" proxmox-auto-install-assistant validate-answer "/work/$ANSWER_FILE"
+# `validate-answer` ALWAYS EXITS 0 - even when it prints
+# "Error: Found issues in the answer file." (verified against
+# proxmox-installer-common 9.2.7). Its exit status is therefore useless, and
+# the output has to be matched instead. Trusting $? here silently accepts a
+# broken answer file and you only find out when the target fails to install.
+_out="$(run "$ANSWER_DIR" proxmox-auto-install-assistant validate-answer "/work/$ANSWER_FILE" 2>&1)" || true
+printf '%s\n' "$_out"
+if ! printf '%s' "$_out" | grep -q 'parsed successfully'; then
+    echo "prepare-auto-iso.sh: the answer file is NOT valid - fix it before building." >&2
+    exit 1
+fi
 
 if [ "$VALIDATE_ONLY" -eq 1 ]; then
     echo
