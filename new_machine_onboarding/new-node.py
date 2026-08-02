@@ -468,6 +468,23 @@ filesystem = "{cfg['filesystem']}"
     return answer_file
 
 
+def default_answers_dir():
+    """Where --serve publishes when not told explicitly.
+
+    Run on the PXE server itself, that is the directory the answer server
+    actually reads, so enrolling a machine is genuinely one command. Run
+    anywhere else there is no such directory, so it stays local and has to be
+    copied across - which the caller is told about, rather than silently
+    writing somewhere nothing will ever read.
+    """
+    env = os.environ.get("PXE_ANSWER_DIR")
+    if env:
+        return env
+    if os.path.isdir("/srv/pxe/answers"):
+        return "/srv/pxe/answers"
+    return os.path.join(HERE, "answers")
+
+
 def serve_answer(answer_file, name, mac, answers_dir):
     """Publish the answer file for the answer server to hand out.
 
@@ -476,7 +493,7 @@ def serve_answer(answer_file, name, mac, answers_dir):
     default.toml, which every machine matches - fine when onboarding one at a
     time, dangerous when several could netboot at once, so say so.
     """
-    target_dir = answers_dir or os.path.join(HERE, "answers")
+    target_dir = answers_dir or default_answers_dir()
     os.makedirs(target_dir, mode=0o750, exist_ok=True)
     if mac:
         norm = re.sub(r"[^0-9a-f]", "", str(mac).lower())
@@ -491,6 +508,10 @@ def serve_answer(answer_file, name, mac, answers_dir):
     shutil.copyfile(answer_file, dest)
     os.chmod(dest, 0o640)
     print(f"    served -> {dest} ({note})")
+    if not dest.startswith("/srv/pxe/"):
+        print(f"    NOTE: that is a local directory. The answer server reads")
+        print(f"          /srv/pxe/answers on the PXE server - copy it across:")
+        print(f"            scp {dest} <user>@<pxe>:/srv/pxe/answers/")
 
 
 def validate(answer_file):
@@ -562,7 +583,7 @@ def main():
                     help="also copy the answer into the answer server's directory "
                          "(fleet mode: no per-machine ISO rebuild)")
     ap.add_argument("--answers-dir", default=os.environ.get("PXE_ANSWER_DIR", ""),
-                    help="where --serve writes (default: $PXE_ANSWER_DIR or ./answers)")
+                    help="where --serve writes (default: $PXE_ANSWER_DIR, else /srv/pxe/answers if present, else ./answers)")
     ap.add_argument("--dry-run", action="store_true", help="show what would be written")
     args = ap.parse_args()
 

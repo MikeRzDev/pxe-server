@@ -6,6 +6,22 @@ End-to-end: from a bare PC on the LAN to a running Proxmox node, unattended.
 > that does it (`proxmox-auto`) is deliberately separate from the interactive
 > one (`proxmox`), and you have to select it on purpose.
 
+## Two ways to do this
+
+| | **Baked** (`proxmox-auto`) | **Fleet** (`proxmox-fleet`) |
+|---|---|---|
+| Answer file | baked into the ISO | fetched over HTTP at install time |
+| Cost per machine | 1.7 GB ISO + 2 GB initrd, ~4 min build | one small text file |
+| Machines at once | one | as many as you like |
+| Targeting | the image *is* the machine's config | by MAC, or `default.toml` for any |
+| Good for | a one-off | onboarding several PCs |
+
+Both wipe the target. Both are built from the same stock ISO. **Fleet mode is
+the one to use for more than a single machine** — the image is built once and
+never again, and enrolling a PC becomes writing a file.
+
+The rest of this document covers the baked path. Fleet mode is below it.
+
 ## What's in here
 
 | File | What |
@@ -127,6 +143,73 @@ wiped.
 
 The node is at `https://<its address>:8006`, user `root@pam`, password in
 `secrets/<name>.env`.
+
+## Fleet mode: one image, many machines
+
+Build the image **once**:
+
+```bash
+./prepare-auto-iso.sh --http http://<pxe-server>:8080/answer /path/to/proxmox-ve_9.2-1.iso
+scp proxmox-ve_9.2-1-fleet.iso <user>@<pxe>:/srv/pxe/iso/
+ssh <user>@<pxe> 'sudo ~/pxe-server/payloads/build-proxmox.sh \
+     --iso /srv/pxe/iso/proxmox-ve_9.2-1-fleet.iso --name pve-fleet'
+```
+
+Confirm it carries no answer file and knows where to ask:
+
+```
+Auto-install:  enabled
+Fetch mode:    http
+HTTP URL:      http://<pxe-server>:8080/answer
+```
+
+Then enrol each machine — **no rebuild**:
+
+```bash
+ssh <user>@<pxe>                       # run it here and it publishes directly
+cd ~/pxe-server/new_machine_onboarding
+./new-node.py pve02 --serve --mac aa:bb:cc:dd:ee:ff
+sudo -A pxectl proxmox-fleet
+```
+
+Run from anywhere else it writes locally and tells you to copy the file to
+`/srv/pxe/answers/` yourself.
+
+### How the machine is identified
+
+The installer POSTs a description of itself — DMI data plus every NIC's MAC —
+and the server matches those MACs against `/srv/pxe/answers/`:
+
+```
+aa:bb:cc:dd:ee:ff.toml     any spelling: colons, dashes or bare hex
+aabbccddeeff.toml
+default.toml               used when no MAC matches
+```
+
+A multi-NIC machine matches on **any** of its NICs.
+
+> **Without `--mac` the answer is written as `default.toml`, which every
+> machine matches.** That is fine when you are onboarding one PC at a time, and
+> dangerous if several could netboot at once — they would all install the same
+> hostname and IP. Pass `--mac` as soon as you have more than one.
+
+Don't know the MAC yet? Either read it off the NIC/BIOS, or boot the machine
+once against `proxmox-fleet` with no answer present: the request is refused
+with a 404 and the MAC is logged, which is a harmless way to learn it.
+
+```bash
+sudo -A journalctl -u pxe-answer -f
+# POST /answer from 192.168.1.87 macs=[a4bf01d2ee90] -> ... 
+```
+
+Nothing is installed on a 404, so this is safe.
+
+### Checking it works
+
+```bash
+curl http://<pxe-server>:8080/health          # answer count
+sudo -A journalctl -u pxe-answer -f              # one line per request
+```
 
 ## Requirements on the target
 
