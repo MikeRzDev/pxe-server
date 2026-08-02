@@ -506,6 +506,16 @@ def serve_answer(answer_file, name, mac, answers_dir):
         note = ("as default.toml - EVERY machine that netboots gets this one. "
                 "Pass --mac to target a single machine.")
     shutil.copyfile(answer_file, dest)
+    # The answer server runs as an unprivileged user (www-data) while this
+    # usually runs under sudo, so a plain copy lands root:root and the server
+    # cannot read its own answers - the install then fails at fetch time with
+    # nothing obviously wrong on disk. Inherit the directory's group, which
+    # install.sh set up for exactly this.
+    try:
+        os.chown(dest, -1, os.stat(target_dir).st_gid)
+    except (PermissionError, OSError):
+        print(f"    WARNING: could not set the group on {dest};")
+        print(f"             check the answer server can read it.")
     os.chmod(dest, 0o640)
     print(f"    served -> {dest} ({note})")
     if not dest.startswith("/srv/pxe/"):
@@ -518,6 +528,14 @@ def validate(answer_file):
     helper = os.path.join(HERE, "prepare-auto-iso.sh")
     if not os.access(helper, os.X_OK):
         print("    (prepare-auto-iso.sh missing - skipping validation)")
+        return True
+    # The validator is proxmox-auto-install-assistant, which is amd64-only and
+    # so runs in a container. The PXE server itself typically has no Docker, and
+    # "cannot check" is NOT "invalid" - reporting a perfectly good answer file
+    # as failed is worse than not checking it.
+    if not shutil.which("docker"):
+        print("    (no docker here - skipping validation; run "
+              "prepare-auto-iso.sh --validate where it is available)")
         return True
     res = subprocess.run([helper, "--validate", answer_file],
                          capture_output=True, text=True)
