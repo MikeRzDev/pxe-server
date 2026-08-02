@@ -78,6 +78,10 @@ the workers running — see the last section for why.
 | `install.sh` | idempotent installer, `--dry-run` supported |
 | `uninstall.sh` | removes the machinery; `--purge-payloads` also deletes `/srv/pxe` |
 | `pxe.env.example` | optional overrides for the auto-detected settings |
+| `nodes.env.example` | defaults for `new-node.sh` (address range, gateway, domain) |
+| `payloads/new-node.sh` | provision one node: pick an IP, generate + save the password, emit the answer file |
+| `payloads/prepare-auto-iso.sh` | bake an answer file into an ISO (runs the amd64-only assistant in Docker) |
+| `payloads/answer.toml.example` | annotated answer file, validated against 9.2.7 |
 | `payloads/fetch-iso.sh` | **generic**: download any ISO and unpack it into the HTTP root |
 | `payloads/build-proxmox.sh` | example: fetch the ISO, build the initrd with the ISO embedded |
 | `payloads/build-rescue.sh` | example: fetch the ISO, unpack the archiso tree |
