@@ -186,7 +186,13 @@ Settings resolve CLI > per-node > file defaults > `nodes.env` > built-in, and
 
 Each node's address is either **static** (`ip: 192.0.2.31`) or **allocated**
 (`ip: auto`) from a range you set — the first address that neither answers a
-ping nor is already claimed in `secrets/`. It generates the password and
+ping nor is already claimed in `secrets/`.
+
+Every address is resolved in a **preflight pass before anything is created**, so
+a static address that is already in use, an unusable range, or a pool with fewer
+free addresses than there are nodes fails immediately and writes nothing. Doing
+it inside the provisioning loop instead would leave a half-provisioned batch —
+and since the password is written first, that is real state to clean up. It generates the password and
 **writes it to `secrets/<name>.env` before doing anything else** —
 a random 32-character password that exists only as a hash is a password you
 have lost, along with the node it installs. `secrets/`, `nodes/`, `nodes.env`

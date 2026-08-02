@@ -209,6 +209,10 @@ def load_config_file(path):
 
 # --------------------------------------------------------------------------
 def die(msg, code=1):
+    # Flush stdout first: the progress lines are buffered while stderr is not,
+    # so without this the error appears ABOVE the preflight output that led to
+    # it and reads as though it happened first.
+    sys.stdout.flush()
     print(f"new-node: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -271,23 +275,102 @@ def claimed_ips():
     return out
 
 
+_ping_cache = {}
+
+
 def responds(ip):
-    flag = "-t" if sys.platform == "darwin" else "-W"
-    return subprocess.run(["ping", "-c", "1", flag, "1", ip],
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode == 0
+    """True if something answers at ip. Cached: a preflight over a /24 would
+    otherwise ping the same address once per node being provisioned."""
+    if ip not in _ping_cache:
+        flag = "-t" if sys.platform == "darwin" else "-W"
+        _ping_cache[ip] = subprocess.run(
+            ["ping", "-c", "1", flag, "1", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    return _ping_cache[ip]
 
 
-def pick_ip(pool, taken):
-    for ip in pool:
+def preflight(nodes, base_cfg, args):
+    """Resolve EVERY node's address before anything is written.
+
+    Addresses are checked up front, not inside the provisioning loop, for two
+    reasons. A batch that runs out of addresses half way through would
+    otherwise leave the earlier nodes provisioned and the rest not - and since
+    the password is deliberately written before anything else, that is real
+    state to clean up. And under --dry-run nothing lands in secrets/, so
+    allocating inside the loop handed every 'auto' node the same address.
+
+    Returns [(name, node_cfg, ip)] or exits with a message naming what is
+    wrong: an unusable range, a static address already in use, or a pool with
+    fewer free addresses than there are nodes asking for one.
+    """
+    resolved, planned = [], []
+    taken = claimed_ips()
+
+    for entry in nodes:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            die(f"each node needs a 'name': got {entry!r}")
+        name = str(entry["name"])
+        cfg = dict(base_cfg)
+        cfg.update({k: v for k, v in entry.items() if k != "name" and v is not None})
+        for required in ("gateway", "dns"):
+            if not cfg.get(required):
+                die(f"{name}: '{required}' is not set (nodes.env, the file, or --{required})")
+        planned.append((name, cfg, args.ip or entry.get("ip") or "auto"))
+
+    print("==> preflight: checking addresses")
+
+    # Static first, so they claim their address before any pool allocation can
+    # hand the same one out.
+    for name, cfg, wanted in planned:
+        if wanted == "auto":
+            continue
+        try:
+            ip = str(ipaddress.IPv4Address(wanted))
+        except ValueError:
+            die(f"{name}: '{wanted}' is not a valid IPv4 address")
         if ip in taken:
-            print(f"    {ip} already claimed by another node, skipping")
-            continue
+            die(f"{name}: {ip} is already claimed by another node in secrets/")
         if responds(ip):
-            print(f"    {ip} answers a ping, skipping")
-            continue
-        return ip
-    return None
+            die(f"{name}: {ip} answers a ping - something is already using it.\n"
+                f"       Pick a free address, or use ip: auto with a range.")
+        taken.add(ip)
+        resolved.append((name, cfg, ip))
+        print(f"    {name:12s} {ip}  (static, free)")
+
+    # Then the pools.
+    auto = [(n, c) for n, c, w in planned if w == "auto"]
+    for idx, (name, cfg) in enumerate(auto):
+        spec = cfg.get("ip_range") or ""
+        if not spec:
+            die(f"{name}: ip is 'auto' but no range is set (ip_range, --range, "
+                f"or NODE_IP_START/END in nodes.env)")
+        try:
+            pool = parse_range(spec)
+        except ValueError as exc:
+            die(f"{name}: bad range {spec!r}: {exc}")
+        if not pool:
+            die(f"{name}: range {spec!r} contains no addresses")
+
+        ip = None
+        for cand in pool:
+            if cand in taken or responds(cand):
+                continue
+            ip = cand
+            break
+        if ip is None:
+            still = len(auto) - idx
+            die(f"{name}: no free address left in {spec}.\n"
+                f"       Every address in that range is either answering a ping or "
+                f"already claimed in secrets/.\n"
+                f"       {still} node(s) still need one - widen the range or free some up.")
+        taken.add(ip)
+        resolved.append((name, cfg, ip))
+        print(f"    {name:12s} {ip}  (from {spec})")
+
+    # Preserve the order the nodes were given in.
+    order = {n: i for i, (n, _, _) in enumerate(planned)}
+    resolved.sort(key=lambda r: order[r[0]])
+    return resolved
 
 
 def hash_password(pw):
@@ -471,37 +554,12 @@ def main():
         if getattr(args, k, None):
             cfg[k] = getattr(args, k)
 
+    # Nothing is created until every address is known to be usable.
+    resolved = preflight(nodes, cfg, args)
+
     ok = True
-    for entry in nodes:
-        if not isinstance(entry, dict) or not entry.get("name"):
-            die(f"each node needs a 'name': got {entry!r}")
-        node_cfg = dict(cfg)
-        node_cfg.update({k: v for k, v in entry.items() if k != "name" and v is not None})
-        name = str(entry["name"])
-
-        for required in ("gateway", "dns"):
-            if not node_cfg.get(required):
-                die(f"{name}: '{required}' is not set (nodes.env, the file, or --{required})")
-
-        wanted = args.ip or entry.get("ip") or "auto"
+    for name, node_cfg, ip in resolved:
         print(f"==> {name}")
-        if wanted == "auto":
-            pool = [ip for ip in parse_range(node_cfg.get("ip_range") or "")]
-            if not pool:
-                die(f"{name}: ip is 'auto' but no range is configured (--range / ip_range)")
-            taken = claimed_ips()
-            print(f"    looking for a free address in {node_cfg['ip_range']}")
-            ip = pick_ip(pool, taken)
-            if not ip:
-                die(f"{name}: no free address left in {node_cfg['ip_range']}")
-            print(f"    picked {ip}")
-        else:
-            ip = str(ipaddress.IPv4Address(wanted))
-            if ip in claimed_ips():
-                die(f"{name}: {ip} is already claimed by another node in secrets/")
-            if responds(ip):
-                die(f"{name}: {ip} answers a ping - something already uses it")
-
         answer_file = write_node(node_cfg, name, ip, dry_run=args.dry_run)
         if answer_file and not validate(answer_file):
             print(f"    VALIDATION FAILED - the password is still in secrets/{name}.env",
