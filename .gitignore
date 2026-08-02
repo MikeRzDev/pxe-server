@@ -79,3 +79,8 @@ desktop.ini
 # Per-node output from new-node.sh: cleartext root passwords and the
 # answer files built from them. Never commit either.
 nodes/
+
+# Declarative node definitions naming your real network.
+nodes.yaml
+nodes.yml
+nodes.json

@@ -79,7 +79,8 @@ the workers running — see the last section for why.
 | `uninstall.sh` | removes the machinery; `--purge-payloads` also deletes `/srv/pxe` |
 | `pxe.env.example` | optional overrides for the auto-detected settings |
 | `nodes.env.example` | defaults for `new-node.sh` (address range, gateway, domain) |
-| `payloads/new-node.sh` | provision one node: pick an IP, generate + save the password, emit the answer file |
+| `payloads/new-node.py` | provision nodes from prompts, flags or YAML: pick an IP, generate + save the password, emit the answer file |
+| `nodes.yaml.example` | declarative node definitions for `new-node.py --file` |
 | `payloads/prepare-auto-iso.sh` | bake an answer file into an ISO (runs the amd64-only assistant in Docker) |
 | `payloads/answer.toml.example` | annotated answer file, validated against 9.2.7 |
 | `payloads/fetch-iso.sh` | **generic**: download any ISO and unpack it into the HTTP root |
@@ -178,12 +179,24 @@ installed. `prepare-auto-iso.sh` therefore runs it inside a
 `--platform linux/amd64` container. It's emulated and takes a few minutes, but
 it's a one-off, and it does not have to run on the PXE server.
 
-`new-node.sh` allocates the next free address in the range from `nodes.env`
-(skipping anything that answers a ping or is already claimed), generates the
-password, and **writes it to `secrets/<name>.env` before doing anything else** —
+`new-node.py` takes its input three ways — **interactive prompts**, **flags**, or
+a **YAML/JSON file** (`nodes.yaml.example`) describing many nodes at once.
+Settings resolve CLI > per-node > file defaults > `nodes.env` > built-in, and
+`--dry-run` prints what it would write without touching anything.
+
+Each node's address is either **static** (`ip: 192.0.2.31`) or **allocated**
+(`ip: auto`) from a range you set — the first address that neither answers a
+ping nor is already claimed in `secrets/`. It generates the password and
+**writes it to `secrets/<name>.env` before doing anything else** —
 a random 32-character password that exists only as a hash is a password you
-have lost, along with the node it installs. `secrets/` and `nodes/` are
-gitignored.
+have lost, along with the node it installs. `secrets/`, `nodes/`, `nodes.env`
+and `nodes.yaml` are all gitignored.
+
+The YAML reader is a **documented subset** parsed with the stdlib, not PyYAML —
+which is absent from a stock macOS and DietPi Python, and on 3.14 needs a venv
+to install. It handles nested mappings, `- ` lists, quoted scalars and comments,
+and **raises on anything else** (flow style, anchors, tabs) rather than
+misparsing it. A `.json` file works too.
 
 **Use `root-password-hashed`, not `root-password`.** The answer file ends up
 inside the ISO *and* inside the 2 GB initrd that this server hands out over

@@ -1,0 +1,52 @@
+# Declarative node definitions for new-node.py.
+#
+#   cp nodes.yaml.example nodes.yaml && $EDITOR nodes.yaml
+#   ./payloads/new-node.py --file nodes.yaml --dry-run
+#   ./payloads/new-node.py --file nodes.yaml
+#
+# nodes.yaml is gitignored (it names your real network). Addresses below are
+# RFC 5737 documentation examples - replace them.
+#
+# Parsed by a small YAML SUBSET reader, not PyYAML: two-space nested mappings,
+# "- " lists, quoted or bare scalars, "#" comments. No anchors, no flow style
+# ({a: 1}), no multi-line scalars. A .json file works too, via the stdlib.
+
+defaults:
+  domain: lan
+  gateway: 203.0.113.1
+  dns: 203.0.113.1
+  cidr_bits: 24
+
+  # Pool that `ip: auto` allocates from. The first address that is neither
+  # claimed in secrets/ nor answering a ping is taken.
+  # Both forms work:  203.0.113.20-203.0.113.40   or   203.0.113.20-40
+  ip_range: 203.0.113.20-40
+
+  timezone: UTC
+  country: us
+  keyboard: en-us
+  mailto: you@example.com
+
+  filesystem: ext4
+  # "auto" -> filter.DEVNAME = "*", resolved on the target, so it installs to
+  # whatever the single disk is called (sda, nvme0n1, vda). On a machine with
+  # MORE THAN ONE disk that is ambiguous - name the disk for those.
+  disk: auto
+
+  # Optional: root gets this key, so you can SSH in the moment it boots.
+  #ssh_key: ssh-ed25519 AAAA... you@host
+
+nodes:
+  # Take the next free address from ip_range.
+  - name: pve01
+    ip: auto
+
+  # Or pin a static address per node.
+  - name: pve02
+    ip: 203.0.113.31
+
+  # Anything in defaults can be overridden per node.
+  - name: pve03
+    ip: auto
+    disk: nvme0n1
+    filesystem: zfs
