@@ -64,6 +64,8 @@ LAN_NET="${LAN_NET:-${LAN_CIDR%/*}}"
 SERVER_NAME="${SERVER_NAME:-$(hostname -s 2>/dev/null || echo pxe)}"
 PXE_USER="${PXE_USER:-${SUDO_USER:-$(id -un)}}"
 PXE_ROOT="${PXE_ROOT:-/srv/pxe}"
+ANSWER_DIR="${ANSWER_DIR:-$PXE_ROOT/answers}"
+ANSWER_PORT="${ANSWER_PORT:-8080}"
 
 for v in IFACE SERVER_IP LAN_CIDR LAN_NET; do
     if [ -z "${!v}" ]; then
@@ -85,6 +87,7 @@ PXE server install
   LAN         : $LAN_CIDR  (network $LAN_NET)
   server name : $SERVER_NAME
   payload root: $PXE_ROOT
+  answers     : $ANSWER_DIR  (served on :$ANSWER_PORT for fleet mode)
   wrappers to : $PXE_HOME/scripts   (user $PXE_USER)
   mode        : $([ "$DRY_RUN" -eq 1 ] && echo "DRY RUN - nothing will change" || echo "applying")
 
@@ -114,6 +117,8 @@ render() {
         -e "s|@@LAN_NET@@|$LAN_NET|g" \
         -e "s|@@IFACE@@|$IFACE|g" \
         -e "s|@@SERVER_NAME@@|$SERVER_NAME|g" \
+        -e "s|@@ANSWER_DIR@@|$ANSWER_DIR|g" \
+        -e "s|@@ANSWER_PORT@@|$ANSWER_PORT|g" \
         "$src" > "$tmp"
     if grep -q '@@[A-Z_]*@@' "$tmp"; then
         echo "install.sh: unsubstituted placeholder in $dst:" >&2
@@ -143,14 +148,18 @@ fi
 
 # Both workers are driven by pxe@.service and must never come up on their own.
 step "disable dnsmasq/nginx at boot (pxe@.service owns them)"
-RUN systemctl disable --now dnsmasq.service 2>/dev/null || true
-RUN systemctl disable --now nginx.service   2>/dev/null || true
+RUN systemctl disable --now dnsmasq.service    2>/dev/null || true
+RUN systemctl disable --now nginx.service      2>/dev/null || true
+RUN systemctl disable --now pxe-answer.service 2>/dev/null || true
 
 # ---------------------------------------------------------- 2 directories ----
 step "directories under $PXE_ROOT"
 for d in tftp http iso; do
     RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_ROOT/$d"
 done
+# Answer files hold a root password hash and are read by the answer server,
+# which runs as www-data. Not world-readable.
+RUN install -d -o "$PXE_USER" -g www-data -m 0750 "$ANSWER_DIR"
 # nginx logs live on a tmpfs on DietPi; the drop-in recreates this at start,
 # but create it now so a manual `nginx -t` before first start also works.
 RUN install -d -o www-data -g adm -m 0755 /var/log/nginx
@@ -206,6 +215,10 @@ RUN rm -f /etc/systemd/system/dnsmasq.service.d/pxe.conf \
 
 step "pxectl"
 render "$HERE/templates/usr/local/sbin/pxectl" /usr/local/sbin/pxectl 0755
+
+step "answer server (fleet mode)"
+render "$HERE/templates/usr/local/sbin/pxe-answer-server" /usr/local/sbin/pxe-answer-server 0755
+render "$HERE/templates/etc/systemd/system/pxe-answer.service" /etc/systemd/system/pxe-answer.service 0644
 
 step "wrapper scripts -> $PXE_HOME/scripts"
 RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_HOME/scripts"

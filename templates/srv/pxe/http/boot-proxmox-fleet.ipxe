@@ -1,0 +1,68 @@
+#!ipxe
+# pxe-description: Proxmox VE 9.2-1 FLEET (answer over HTTP) - WIPES THE TARGET DISK
+# pxe-payload-dir: pve-fleet
+#
+# Unattended Proxmox install, served by @@SERVER_NAME@@ (@@SERVER_IP@@).
+#
+# ###########################################################################
+# # THIS DESTROYS THE TARGET MACHINE'S DISK WITH NO CONFIRMATION.           #
+# # It partitions and formats according to the answer file the server hands #
+# # it. Any machine that netboots this loses its data. Serve it only when   #
+# # you mean to, and stop the server afterwards:  ~/scripts/pxe-stop.sh     #
+# ###########################################################################
+#
+# FLEET mode. Unlike boot-proxmox-auto.ipxe, this image carries NO answer file.
+# The installer POSTs a description of itself - including every NIC's MAC - to
+# the answer server, which replies with that machine's answer file. So ONE
+# image serves the whole fleet and enrolling a machine is a small text file
+# rather than a per-machine 2 GB rebuild.
+#
+# Build it ONCE with:
+#   ./new_machine_onboarding/prepare-auto-iso.sh --http http://SERVER:8080/answer \
+#        proxmox-ve_9.2-1.iso
+#   sudo ./payloads/build-proxmox.sh --iso .../proxmox-ve_9.2-1-fleet.iso --name pve-fleet
+#
+# Then per machine: ./new_machine_onboarding/new-node.py <name> --serve
+
+set base-url http://@@SERVER_IP@@
+set kbase ro ramdisk_size=16777216 rw quiet splash=silent
+
+:start
+menu Proxmox VE 9.2-1  --  FLEET install  (@@SERVER_NAME@@)
+item --gap --                 *** THIS ERASES THE DISK OF THIS MACHINE ***
+item auto                     Install now, unattended            [default in 15s]
+item --gap --                 Get out
+item abort                    Abort - drop to an iPXE shell, change nothing
+item reboot                   Reboot
+choose --timeout 15000 --default auto selected || goto auto
+goto ${selected}
+
+:auto
+set kopts ${kbase} proxmox-start-auto-installer
+goto load
+
+:load
+echo
+echo Loading the UNATTENDED Proxmox VE 9.2-1 installer.
+echo   cmdline : ${kopts}
+echo   client  : ${net0/mac}  ${ip}
+echo
+echo This machine's disk is about to be erased. Power it off NOW to stop.
+echo
+sleep 5
+kernel ${base-url}/pve-fleet/linux26 ${kopts} || goto failed
+initrd ${base-url}/pve-fleet/initrd || goto failed
+boot || goto failed
+
+:failed
+echo
+echo BOOT FAILED - dropping to an iPXE shell. Nothing was written.
+echo Try:  imgfetch ${base-url}/pve-fleet/linux26
+echo
+
+:abort
+echo Aborted. The disk was not touched.
+shell
+
+:reboot
+reboot

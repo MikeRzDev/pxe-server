@@ -1,0 +1,22 @@
+[Unit]
+Description=PXE answer server - per-machine Proxmox answer files over HTTP
+Documentation=https://github.com/MikeRzDev/pxe-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/pxe-answer-server
+Restart=on-failure
+RestartSec=2
+# Read-only view of everything except the answer directory it serves.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# Answers hold a root password hash, so do not run this as root.
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

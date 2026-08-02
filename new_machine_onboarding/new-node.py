@@ -468,6 +468,31 @@ filesystem = "{cfg['filesystem']}"
     return answer_file
 
 
+def serve_answer(answer_file, name, mac, answers_dir):
+    """Publish the answer file for the answer server to hand out.
+
+    Named after the MAC when one is known, because that is the only thing the
+    installer reliably tells the server about itself. Without a MAC it becomes
+    default.toml, which every machine matches - fine when onboarding one at a
+    time, dangerous when several could netboot at once, so say so.
+    """
+    target_dir = answers_dir or os.path.join(HERE, "answers")
+    os.makedirs(target_dir, mode=0o750, exist_ok=True)
+    if mac:
+        norm = re.sub(r"[^0-9a-f]", "", str(mac).lower())
+        if len(norm) != 12:
+            die(f"{name}: --mac {mac!r} is not a MAC address")
+        dest = os.path.join(target_dir, f"{norm}.toml")
+        note = f"matched by MAC {mac}"
+    else:
+        dest = os.path.join(target_dir, "default.toml")
+        note = ("as default.toml - EVERY machine that netboots gets this one. "
+                "Pass --mac to target a single machine.")
+    shutil.copyfile(answer_file, dest)
+    os.chmod(dest, 0o640)
+    print(f"    served -> {dest} ({note})")
+
+
 def validate(answer_file):
     helper = os.path.join(HERE, "prepare-auto-iso.sh")
     if not os.access(helper, os.X_OK):
@@ -532,6 +557,12 @@ def main():
     ap.add_argument("--disk", help="'auto', a name, or a comma list (zfs/btrfs only)")
     ap.add_argument("--fs", dest="filesystem", help="ext4|xfs|zfs|btrfs")
     ap.add_argument("--mailto")
+    ap.add_argument("--mac", help="target NIC MAC - names the answer file for fleet mode")
+    ap.add_argument("--serve", action="store_true",
+                    help="also copy the answer into the answer server's directory "
+                         "(fleet mode: no per-machine ISO rebuild)")
+    ap.add_argument("--answers-dir", default=os.environ.get("PXE_ANSWER_DIR", ""),
+                    help="where --serve writes (default: $PXE_ANSWER_DIR or ./answers)")
     ap.add_argument("--dry-run", action="store_true", help="show what would be written")
     args = ap.parse_args()
 
@@ -563,6 +594,9 @@ def main():
     for name, node_cfg, ip in resolved:
         print(f"==> {name}")
         answer_file = write_node(node_cfg, name, ip, dry_run=args.dry_run)
+        if answer_file and args.serve:
+            serve_answer(answer_file, name, node_cfg.get("mac") or args.mac,
+                         args.answers_dir)
         if answer_file and not validate(answer_file):
             print(f"    VALIDATION FAILED - the password is still in secrets/{name}.env",
                   file=sys.stderr)

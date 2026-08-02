@@ -32,6 +32,7 @@ set -u
 
 LAN="@@LAN_CIDR@@"
 WWW="/srv/pxe/http"
+ANSWERS="@@ANSWER_DIR@@"
 
 # port/proto|source|description
 #
@@ -46,6 +47,7 @@ PORTS=(
     "4011/udp|any|proxy-DHCP (PXE re-request)"
     "69/udp|$LAN|TFTP"
     "80/tcp|$LAN|HTTP payload"
+    "@@ANSWER_PORT@@/tcp|$LAN|answer server (fleet mode)"
 )
 
 need_root() {
@@ -136,7 +138,7 @@ fw_close() {
 # So ExecStop closes the firewall and nothing else, and taking the workers down
 # is the `off` verb's job, where it is an ordinary blocking call in its own
 # transaction and neither failure applies.
-stop_workers() { systemctl stop dnsmasq.service nginx.service 2>/dev/null; }
+stop_workers() { systemctl stop dnsmasq.service nginx.service pxe-answer.service 2>/dev/null; }
 
 usage() {
     echo "usage: pxectl {<payload>|off|status|list|log}" >&2
@@ -212,11 +214,15 @@ status)
             "pxe@$name" "$(systemctl is-active "pxe@$name" 2>/dev/null)" \
             "$(systemctl is-enabled "pxe@$name" 2>/dev/null)"
     done
-    for u in dnsmasq nginx; do
+    for u in dnsmasq nginx pxe-answer; do
         printf "  %-12s: %-10s (at boot: %s)\n" \
             "$u" "$(systemctl is-active "$u" 2>/dev/null)" \
             "$(systemctl is-enabled "$u" 2>/dev/null)"
     done
+    if [ -d "$ANSWERS" ]; then
+        n=$(ls -1 "$ANSWERS"/*.toml 2>/dev/null | wc -l | tr -d " ")
+        echo "  answers  : $n file(s) in $ANSWERS"
+    fi
     echo "  payloads :"
     for name in $(payload_names); do
         dir=$(payload_meta "$name" payload-dir)

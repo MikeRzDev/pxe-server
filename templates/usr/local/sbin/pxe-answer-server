@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""pxe-answer-server - hand each machine its own Proxmox answer file.
+
+With `prepare-iso --fetch-from http`, the installer does NOT carry an answer
+file. It POSTs a JSON description of itself - DMI data plus every NIC's MAC -
+and expects the answer back as TOML or JSON with a 200. That inverts the
+economics of onboarding: one ISO and one 2 GB initrd serve the whole fleet, and
+enrolling a machine becomes writing a small text file instead of rebuilding a
+per-machine image.
+
+Answers live in @@ANSWER_DIR@@ and are matched against the POSTed MACs:
+
+    aa:bb:cc:dd:ee:ff.toml      any of these spellings works
+    aabbccddeeff.toml
+    aa-bb-cc-dd-ee-ff.toml
+    default.toml                used when no MAC matches
+
+A machine with several NICs matches on any of them.
+
+This runs as its own service on its own port rather than through nginx,
+because the installer uses POST and nginx answers a POST for a static file
+with 405. Working around that needs `error_page 405 =200 $uri;` AND still
+leaves every machine getting the same file - which defeats the point.
+
+Deliberately plain HTTP on the LAN, matching the rest of this server. Note the
+answer contains the root password hash, so anyone on the LAN who can guess a
+MAC can read that hash - the same exposure as the initrd itself.
+"""
+
+import json
+import logging
+import os
+import re
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ANSWER_DIR = os.environ.get("PXE_ANSWER_DIR", "@@ANSWER_DIR@@")
+PORT = int(os.environ.get("PXE_ANSWER_PORT", "@@ANSWER_PORT@@"))
+BIND = os.environ.get("PXE_ANSWER_BIND", "0.0.0.0")
+MAX_BODY = 1 << 20  # 1 MiB; the real payload is a few KB
+
+log = logging.getLogger("pxe-answer")
+
+
+def norm_mac(mac):
+    """aa:BB-cc.DD:ee:ff -> aabbccddeeff"""
+    return re.sub(r"[^0-9a-f]", "", str(mac).lower())
+
+
+def macs_from_payload(data):
+    """Pull every MAC out of the installer's POST body.
+
+    The documented shape is {"network_interfaces": [{"link":..., "mac":...}]},
+    but the blob has changed across releases, so fall back to scanning the
+    whole structure for anything MAC-shaped rather than depending on one path.
+    """
+    found = []
+    for iface in (data.get("network_interfaces") or []):
+        if isinstance(iface, dict) and iface.get("mac"):
+            found.append(iface["mac"])
+    if not found:
+        pat = re.compile(r"\b([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b")
+
+        def walk(node):
+            if isinstance(node, dict):
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+            elif isinstance(node, str):
+                found.extend(pat.findall(node))
+        walk(data)
+    seen, out = set(), []
+    for m in found:
+        n = norm_mac(m)
+        if n and len(n) == 12 and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def find_answer(macs):
+    """Return (path, matched_mac_or_None). Exact MAC wins over the default."""
+    if not os.path.isdir(ANSWER_DIR):
+        return None, None
+    by_norm = {}
+    for name in os.listdir(ANSWER_DIR):
+        if not name.endswith(".toml"):
+            continue
+        stem = name[:-5]
+        if stem == "default":
+            continue
+        by_norm.setdefault(norm_mac(stem), name)
+    for mac in macs:
+        if mac in by_norm:
+            return os.path.join(ANSWER_DIR, by_norm[mac]), mac
+    default = os.path.join(ANSWER_DIR, "default.toml")
+    if os.path.exists(default):
+        return default, None
+    return None, None
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "pxe-answer/1.0"
+
+    def log_message(self, fmt, *args):  # route through logging, not stderr
+        log.info("%s %s", self.address_string(), fmt % args)
+
+    def _send(self, code, body=b"", ctype="text/plain; charset=utf-8"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def do_GET(self):
+        # Not what the installer uses, but makes the service testable by hand
+        # and gives something to point a health check at.
+        if self.path.rstrip("/") in ("/health", "/healthz"):
+            n = len([f for f in os.listdir(ANSWER_DIR)
+                     if f.endswith(".toml")]) if os.path.isdir(ANSWER_DIR) else 0
+            return self._send(200, f"ok, {n} answer file(s) in {ANSWER_DIR}\n".encode())
+        path, mac = find_answer([])
+        if not path:
+            return self._send(404, b"no default.toml; POST from an installer to match by MAC\n")
+        with open(path, "rb") as fh:
+            body = fh.read()
+        log.info("GET %s -> %s (default, no MAC)", self.path, os.path.basename(path))
+        return self._send(200, body, "application/toml")
+
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_BODY:
+            log.warning("rejecting oversized body (%d bytes) from %s", length, self.address_string())
+            return self._send(413, b"payload too large\n")
+        raw = self.rfile.read(length) if length else b""
+
+        macs = []
+        try:
+            data = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+            macs = macs_from_payload(data) if isinstance(data, dict) else []
+        except (ValueError, AttributeError) as exc:
+            # Answer on the default anyway - a body we cannot parse is far more
+            # likely to be a schema change than an attack, and failing the
+            # install outright over it is the worse outcome.
+            log.warning("could not parse POST body from %s: %s", self.address_string(), exc)
+
+        path, matched = find_answer(macs)
+        if not path:
+            log.error("NO ANSWER for %s (macs=%s) - add <mac>.toml or default.toml to %s",
+                      self.address_string(), ",".join(macs) or "none", ANSWER_DIR)
+            return self._send(404, b"no matching answer file\n")
+
+        with open(path, "rb") as fh:
+            body = fh.read()
+        log.info("POST %s from %s macs=[%s] -> %s%s",
+                 self.path, self.address_string(), ",".join(macs) or "none",
+                 os.path.basename(path),
+                 f" (matched {matched})" if matched else " (default)")
+        return self._send(200, body, "application/toml")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    if not os.path.isdir(ANSWER_DIR):
+        log.warning("%s does not exist yet - every request will 404 until it does", ANSWER_DIR)
+    log.info("serving answers from %s on %s:%d", ANSWER_DIR, BIND, PORT)
+    ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

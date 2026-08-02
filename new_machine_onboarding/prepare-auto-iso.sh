@@ -4,6 +4,13 @@
 #
 #   ./prepare-auto-iso.sh nodes/pve01.answer.toml proxmox-ve_9.2-1.iso [out.iso]
 #   ./prepare-auto-iso.sh --validate answer.toml       # syntax-check only
+#   ./prepare-auto-iso.sh --http http://SERVER:8080/answer proxmox-ve_9.2-1.iso
+#
+# The --http form bakes NO answer file. The installer POSTs a description of
+# itself - including every NIC's MAC - to that URL and the answer server replies
+# with the answer for that machine. One image then serves the whole fleet, and
+# enrolling a machine is a small text file instead of a per-machine 2 GB
+# rebuild. Build it once; use the first form only for a one-off machine.
 #
 # ############################################################################
 # # THE RESULTING IMAGE WIPES THE TARGET DISK WITH NO PROMPT AND NO          #
@@ -44,21 +51,37 @@ set -euo pipefail
 IMAGE="pve-autoinstall:9.2"
 PVE_SUITE="trixie"
 VALIDATE_ONLY=0
+HTTP_URL=""
 
-if [ "${1:-}" = "--validate" ]; then VALIDATE_ONLY=1; shift; fi
+case "${1:-}" in
+    --validate) VALIDATE_ONLY=1; shift ;;
+    --http)     HTTP_URL="${2:?--http needs a URL}"; shift 2 ;;
+esac
 
-ANSWER="${1:-}"
-SRC_ISO="${2:-}"
-OUT_ISO="${3:-}"
+if [ -n "$HTTP_URL" ]; then
+    ANSWER=""
+    SRC_ISO="${1:-}"
+    OUT_ISO="${2:-}"
+else
+    ANSWER="${1:-}"
+    SRC_ISO="${2:-}"
+    OUT_ISO="${3:-}"
+fi
 
 usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1; }
 
-[ -n "$ANSWER" ] || usage
-[ -f "$ANSWER" ] || { echo "prepare-auto-iso.sh: no such answer file: $ANSWER" >&2; exit 1; }
+if [ -z "$HTTP_URL" ]; then
+    [ -n "$ANSWER" ] || usage
+    [ -f "$ANSWER" ] || { echo "prepare-auto-iso.sh: no such answer file: $ANSWER" >&2; exit 1; }
+fi
 if [ "$VALIDATE_ONLY" -eq 0 ]; then
     [ -n "$SRC_ISO" ] || usage
     [ -f "$SRC_ISO" ] || { echo "prepare-auto-iso.sh: no such ISO: $SRC_ISO" >&2; exit 1; }
-    OUT_ISO="${OUT_ISO:-${SRC_ISO%.iso}-auto.iso}"
+    if [ -n "$HTTP_URL" ]; then
+        OUT_ISO="${OUT_ISO:-${SRC_ISO%.iso}-fleet.iso}"
+    else
+        OUT_ISO="${OUT_ISO:-${SRC_ISO%.iso}-auto.iso}"
+    fi
 fi
 
 command -v docker >/dev/null || {
@@ -91,9 +114,13 @@ fi
 run() { docker run --rm --platform linux/amd64 -v "$1:/work" "$IMAGE" "${@:2}"; }
 
 # --------------------------------------------------------------- validate ---
-ANSWER_DIR="$(cd "$(dirname "$ANSWER")" && pwd)"
-ANSWER_FILE="$(basename "$ANSWER")"
+ANSWER_DIR="$([ -n "$ANSWER" ] && cd "$(dirname "$ANSWER")" && pwd || echo "")"
+ANSWER_FILE="$([ -n "$ANSWER" ] && basename "$ANSWER" || echo "")"
 
+if [ -n "$HTTP_URL" ]; then
+    echo "==> fleet mode: no answer file is baked in; it will be fetched from"
+    echo "    $HTTP_URL"
+else
 echo "==> validating $ANSWER"
 # `validate-answer` ALWAYS EXITS 0 - even when it prints
 # "Error: Found issues in the answer file." (verified against
@@ -112,11 +139,33 @@ if [ "$VALIDATE_ONLY" -eq 1 ]; then
     echo "Valid. Re-run without --validate and pass an ISO to bake it in."
     exit 0
 fi
+fi
 
 # ---------------------------------------------------------------- prepare ---
 ISO_DIR="$(cd "$(dirname "$SRC_ISO")" && pwd)"
 ISO_FILE="$(basename "$SRC_ISO")"
 OUT_FILE="$(basename "$OUT_ISO")"
+
+if [ -n "$HTTP_URL" ]; then
+    echo "==> preparing a fleet ISO (answers fetched at install time)"
+    run "$ISO_DIR" proxmox-auto-install-assistant prepare-iso \
+        "/work/$ISO_FILE" --fetch-from http --url "$HTTP_URL" \
+        --output "/work/$OUT_FILE"
+    echo
+    echo "Done: $ISO_DIR/$OUT_FILE"
+    ls -lh "$ISO_DIR/$OUT_FILE" | awk '{print "  " $5, $9}'
+    cat <<EOF
+
+Build the payload ONCE, then enrol machines by writing answer files:
+
+  scp $ISO_DIR/$OUT_FILE <user>@<pxe>:/srv/pxe/iso/
+  sudo -A ~/pxe-server/payloads/build-proxmox.sh --iso /srv/pxe/iso/$OUT_FILE --name pve-fleet
+  sudo -A pxectl proxmox-fleet
+
+  ./new_machine_onboarding/new-node.py <name> --serve   # per machine, no rebuild
+EOF
+    exit 0
+fi
 
 if [ "$ISO_DIR" != "$ANSWER_DIR" ]; then
     cp "$ANSWER" "$ISO_DIR/.answer.tmp.toml"

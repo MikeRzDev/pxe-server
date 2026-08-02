@@ -4,8 +4,8 @@ Documentation=https://github.com/MikeRzDev/pxe-server
 # %i is the payload (the image being served). A payload is any
 # /srv/pxe/http/boot-<name>.ipxe - the set is discovered at runtime, so
 # nothing here needs editing to add an image. `pxectl list` shows them.
-Wants=dnsmasq.service nginx.service
-After=network-online.target dnsmasq.service nginx.service
+Wants=dnsmasq.service nginx.service pxe-answer.service
+After=network-online.target dnsmasq.service nginx.service pxe-answer.service
 
 # NOTE: deliberately no Conflicts= between instances, and no PartOf= drop-ins
 # on dnsmasq/nginx. Both can only name concrete instances, which is impossible
