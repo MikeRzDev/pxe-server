@@ -35,10 +35,12 @@ root-password-hashed = "$6$REPLACE$ME"
 
 [network]
 # --- static (this file's default) ---
+# Addresses below are RFC 5737 documentation examples - replace all three with
+# your own. Pick one that is outside your router's DHCP pool.
 source  = "from-answer"
-cidr    = "192.168.1.230/24"    # the NEW node's address - must NOT collide
-gateway = "192.168.1.1"
-dns     = "9.9.9.9"
+cidr    = "203.0.113.10/24"     # the NEW node's address - must NOT collide
+gateway = "203.0.113.1"
+dns     = "203.0.113.1"
 # Which NIC to configure. "*" takes the first match, which is fine for a
 # single-NIC box. For a multi-NIC machine pin it by MAC:
 #   filter.ID_NET_NAME_MAC = "*a1b2c3d4e5f6*"
