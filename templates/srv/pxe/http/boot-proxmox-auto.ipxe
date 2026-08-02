@@ -1,0 +1,64 @@
+#!ipxe
+# pxe-description: Proxmox VE 9.2-1 UNATTENDED - WIPES THE TARGET DISK
+# pxe-payload-dir: pve-auto
+#
+# Unattended Proxmox install, served by @@SERVER_NAME@@ (@@SERVER_IP@@).
+#
+# ###########################################################################
+# # THIS DESTROYS THE TARGET MACHINE'S DISK WITH NO CONFIRMATION.           #
+# # It partitions and formats according to the answer file baked into the   #
+# # ISO. Any machine that netboots this loses its data. Serve it only when  #
+# # you mean to, and stop the server afterwards:  ~/scripts/pxe-stop.sh     #
+# ###########################################################################
+#
+# The only difference from boot-proxmox.ipxe is `proxmox-start-auto-installer`
+# on the kernel cmdline, plus a payload built from an ISO that
+# proxmox-auto-install-assistant has baked an answer file into. Without BOTH
+# halves you just get the normal interactive installer.
+#
+# Build the payload with:
+#   ./payloads/prepare-auto-iso.sh answer.toml proxmox-ve_9.2-1.iso
+#   sudo ./payloads/build-proxmox.sh --iso .../proxmox-ve_9.2-1-auto.iso --name pve-auto
+
+set base-url http://@@SERVER_IP@@
+set kbase ro ramdisk_size=16777216 rw quiet splash=silent
+
+:start
+menu Proxmox VE 9.2-1  --  UNATTENDED install  (@@SERVER_NAME@@)
+item --gap --                 *** THIS ERASES THE DISK OF THIS MACHINE ***
+item auto                     Install now, unattended            [default in 15s]
+item --gap --                 Get out
+item abort                    Abort - drop to an iPXE shell, change nothing
+item reboot                   Reboot
+choose --timeout 15000 --default auto selected || goto auto
+goto ${selected}
+
+:auto
+set kopts ${kbase} proxmox-start-auto-installer
+goto load
+
+:load
+echo
+echo Loading the UNATTENDED Proxmox VE 9.2-1 installer.
+echo   cmdline : ${kopts}
+echo   client  : ${net0/mac}  ${ip}
+echo
+echo This machine's disk is about to be erased. Power it off NOW to stop.
+echo
+sleep 5
+kernel ${base-url}/pve-auto/linux26 ${kopts} || goto failed
+initrd ${base-url}/pve-auto/initrd || goto failed
+boot || goto failed
+
+:failed
+echo
+echo BOOT FAILED - dropping to an iPXE shell. Nothing was written.
+echo Try:  imgfetch ${base-url}/pve-auto/linux26
+echo
+
+:abort
+echo Aborted. The disk was not touched.
+shell
+
+:reboot
+reboot

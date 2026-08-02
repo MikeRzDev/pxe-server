@@ -134,6 +134,55 @@ Two optional header comments are the only metadata `pxectl` reads:
 # pxe-payload-dir: debian13
 ```
 
+## Unattended Proxmox installs
+
+Clicking through the Proxmox installer gets old fast. Proxmox supports a fully
+automated install driven by an `answer.toml`, and this repo wires it up as its
+own payload so the interactive one stays the default.
+
+> **The unattended payload wipes the target's disk with no confirmation.** It is
+> deliberately a separate payload (`proxmox-auto`) that you have to select — it
+> is never what `pxectl proxmox` serves.
+
+Two halves are required, and it silently falls back to the normal interactive
+installer if either is missing:
+
+1. an ISO with the answer file baked in, and
+2. `proxmox-start-auto-installer` on the kernel command line
+   (that's what `boot-proxmox-auto.ipxe` adds).
+
+```bash
+# 1. describe the target
+cp payloads/answer.toml.example payloads/answer.toml   # gitignored
+$EDITOR payloads/answer.toml
+./payloads/prepare-auto-iso.sh --validate payloads/answer.toml
+
+# 2. bake it in  (needs Docker; see the amd64 note below)
+./payloads/prepare-auto-iso.sh payloads/answer.toml /path/to/proxmox-ve_9.2-1.iso
+
+# 3. build the payload on the PXE server
+scp proxmox-ve_9.2-1-auto.iso user@pxe:/srv/pxe/iso/
+sudo ./payloads/build-proxmox.sh --iso /srv/pxe/iso/proxmox-ve_9.2-1-auto.iso --name pve-auto
+
+# 4. serve it
+sudo pxectl proxmox-auto
+```
+
+**`proxmox-auto-install-assistant` is amd64-only** — Proxmox publishes no arm64
+index at all, so on an arm64 PXE server or an Apple Silicon Mac it cannot be
+installed. `prepare-auto-iso.sh` therefore runs it inside a
+`--platform linux/amd64` container. It's emulated and takes a few minutes, but
+it's a one-off, and it does not have to run on the PXE server.
+
+**Use `root-password-hashed`, not `root-password`.** The answer file ends up
+inside the ISO *and* inside the 2 GB initrd that this server hands out over
+plain HTTP to the whole LAN. Generate one with `openssl passwd -6`.
+
+If you would rather change the answer file without rebuilding a 2 GB initrd
+each time, `prepare-iso --fetch-from http` makes the installer fetch it at
+install time instead. Note it issues a **POST**, so a static-file nginx replies
+`405` — you need `error_page 405 =200 $uri;` in the location block.
+
 ## Things that will bite you
 
 These are the reason the bundle looks the way it does. Each one cost real

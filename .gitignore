@@ -5,6 +5,12 @@ pxe.env
 *.env
 !pxe.env.example
 
+# answer.toml holds the target's ROOT PASSWORD (hashed or not) and its
+# addressing. Only the example is tracked. Never commit a real one.
+answer.toml
+answer*.toml
+!answer.toml.example
+
 # --- payloads ----------------------------------------------------------------
 # Multi-GB images. These are rebuilt from upstream by payloads/*.sh, never
 # stored here. Listed defensively in case anyone builds inside the checkout.

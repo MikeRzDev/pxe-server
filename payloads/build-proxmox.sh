@@ -1,37 +1,64 @@
 #!/bin/bash
-# build-proxmox.sh - fetch a Proxmox VE ISO and build the PXE payload from it.
+# build-proxmox.sh - build a Proxmox VE PXE payload from an ISO.
 #
-#   sudo ./build-proxmox.sh                 # default version below
+#   sudo ./build-proxmox.sh                      # download 9.2-1, build "pve"
 #   sudo ./build-proxmox.sh 9.2-1
 #   PVE_SHA256=<hash> sudo ./build-proxmox.sh 9.2-1
 #
+#   # build the UNATTENDED payload from an already-prepared ISO
+#   sudo ./build-proxmox.sh --iso /srv/pxe/iso/proxmox-ve_9.2-1-auto.iso --name pve-auto
+#
 # Produces:
-#   $PXE_ROOT/http/pve/linux26   the installer kernel (~16 MB)
-#   $PXE_ROOT/http/pve/initrd    the initrd with the ISO embedded (~2.0 GB)
+#   $PXE_ROOT/http/<name>/linux26   the installer kernel (~16 MB)
+#   $PXE_ROOT/http/<name>/initrd    the initrd with the ISO embedded (~2.0 GB)
 #
 # The ISO is EMBEDDED IN THE INITRD on purpose. Proxmox's installer init looks
 # for /proxmox.iso inside the initrd; there is no "fetch the ISO from a URL"
 # kernel parameter. Hence the 2 GB initrd, and hence `ramdisk_size=16777216`
 # on the kernel cmdline in boot-proxmox.ipxe - too small and it will not
 # unpack, with no useful error.
+#
+# --iso lets the same embedding logic serve the unattended variant: an ISO that
+# proxmox-auto-install-assistant has already baked an answer file into. See
+# prepare-auto-iso.sh, which produces that ISO (it needs an amd64 host).
 
 set -euo pipefail
 
-PVE_VERSION="${1:-9.2-1}"
 PXE_ROOT="${PXE_ROOT:-/srv/pxe}"
+PVE_VERSION=""
+SRC_ISO=""
+NAME="pve"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --iso)  SRC_ISO="${2:?--iso needs a path}"; shift 2 ;;
+        --name) NAME="${2:?--name needs a payload directory name}"; shift 2 ;;
+        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) echo "build-proxmox.sh: unknown option '$1'" >&2; exit 1 ;;
+        *)  PVE_VERSION="$1"; shift ;;
+    esac
+done
+PVE_VERSION="${PVE_VERSION:-9.2-1}"
+
 ISO_NAME="proxmox-ve_${PVE_VERSION}.iso"
 ISO_URL="${PVE_ISO_URL:-https://enterprise.proxmox.com/iso/${ISO_NAME}}"
 # All source ISOs live in one place, $PXE_ROOT/iso - same as build-rescue.sh
 # and fetch-iso.sh. Built payloads go under $PXE_ROOT/http/<name>/.
-ISO_PATH="$PXE_ROOT/iso/$ISO_NAME"
+ISO_PATH="${SRC_ISO:-$PXE_ROOT/iso/$ISO_NAME}"
 # Build here, never /tmp - /tmp is a small tmpfs on DietPi and this needs ~4 GB.
 WORK="$PXE_ROOT/work"
-DEST="$PXE_ROOT/http/pve"
+DEST="$PXE_ROOT/http/$NAME"
 MNT="$WORK/mnt"
 
 [ "$(id -u)" -eq 0 ] || { echo "build-proxmox.sh: must run as root (use sudo)" >&2; exit 1; }
 
+if [ -n "$SRC_ISO" ] && [ ! -f "$SRC_ISO" ]; then
+    echo "build-proxmox.sh: --iso '$SRC_ISO' does not exist" >&2
+    exit 1
+fi
+
 echo "Proxmox VE $PVE_VERSION -> $DEST"
+[ -n "$SRC_ISO" ] && echo "  using prepared ISO: $SRC_ISO"
 
 need_free_gb=7
 avail_gb=$(df -BG --output=avail "$PXE_ROOT" | tail -1 | tr -dc '0-9')
@@ -51,6 +78,8 @@ install -d "$PXE_ROOT/iso" "$DEST" "$MNT"
 # ------------------------------------------------------------------ fetch ---
 if [ -f "$ISO_PATH" ]; then
     echo "==> ISO already present: $ISO_PATH"
+elif [ -n "$SRC_ISO" ]; then
+    echo "build-proxmox.sh: prepared ISO '$SRC_ISO' vanished" >&2; exit 1
 else
     echo "==> downloading $ISO_URL"
     wget -c -O "$ISO_PATH" "$ISO_URL"

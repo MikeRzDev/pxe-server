@@ -1,0 +1,63 @@
+# Proxmox VE automated-installation answer file.
+#
+#   cp answer.toml.example answer.toml    # answer.toml is gitignored
+#   $EDITOR answer.toml
+#   ./prepare-auto-iso.sh --validate answer.toml
+#
+# ############################################################################
+# # AN ISO BUILT FROM THIS WIPES THE TARGET DISK WITH NO PROMPT.             #
+# # Double-check `disk-list` before serving it.                              #
+# ############################################################################
+#
+# Validated against proxmox-installer-common 9.2.7. Check your own file with
+# `./prepare-auto-iso.sh --validate answer.toml` before building an ISO -
+# a typo here surfaces as a failed install on the target, which is a slow
+# way to find out.
+
+[global]
+keyboard = "en-us"
+country  = "us"
+timezone = "UTC"
+fqdn     = "pve.local"          # must resolve or at least be unique on the LAN
+mailto   = "you@example.com"
+
+# Set EXACTLY ONE of the two below.
+#
+# Prefer the hashed form. This file is baked into the ISO and then into the
+# 2 GB initrd that the PXE server serves over plain HTTP to the whole LAN, so
+# a plaintext password here is readable by anyone who fetches the initrd.
+# Generate one with:   openssl passwd -6
+root-password-hashed = "$6$REPLACE$ME"
+# root-password = "plaintext-if-you-really-must"
+
+# Optional: drop your public key in so you can SSH in immediately.
+# root-ssh-keys = ["ssh-ed25519 AAAA... you@host"]
+
+[network]
+# --- static (this file's default) ---
+source  = "from-answer"
+cidr    = "192.168.1.230/24"    # the NEW node's address - must NOT collide
+gateway = "192.168.1.1"
+dns     = "9.9.9.9"
+# Which NIC to configure. "*" takes the first match, which is fine for a
+# single-NIC box. For a multi-NIC machine pin it by MAC:
+#   filter.ID_NET_NAME_MAC = "*a1b2c3d4e5f6*"
+# Run `proxmox-auto-install-assistant device-info` on the target (or boot the
+# SystemRescue payload and run `ip link`) to get the real values.
+filter.ID_NET_NAME_MAC = "*"
+
+# --- or DHCP: comment out the four lines above and use just this ---
+# source = "from-dhcp"
+
+[disk-setup]
+filesystem = "ext4"             # ext4 | xfs | zfs | btrfs
+disk-list  = ["sda"]            # <-- VERIFY THIS. Wrong disk = wrong data gone.
+
+# ZFS example instead of the two lines above:
+# filesystem = "zfs"
+# zfs.raid   = "raid1"
+# disk-list  = ["sda", "sdb"]
+
+# LVM sizing is optional; the installer picks sane defaults.
+# lvm.swapsize = 8
+# lvm.maxroot  = 100
