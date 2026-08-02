@@ -2,7 +2,7 @@
 # prepare-auto-iso.sh - bake an answer file into a Proxmox VE ISO so the
 # installer runs UNATTENDED.
 #
-#   ./prepare-auto-iso.sh answer.toml proxmox-ve_9.2-1.iso [out.iso]
+#   ./prepare-auto-iso.sh nodes/pve01.answer.toml proxmox-ve_9.2-1.iso [out.iso]
 #   ./prepare-auto-iso.sh --validate answer.toml       # syntax-check only
 #
 # ############################################################################

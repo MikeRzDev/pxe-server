@@ -163,7 +163,7 @@ cp nodes.env.example nodes.env && $EDITOR nodes.env    # your LAN, gitignored
 ./payloads/new-node.sh pve01                          # or --ip / --disk / --fs
 
 # 2. bake it in  (needs Docker; see the amd64 note below)
-./payloads/prepare-auto-iso.sh nodes/pve01.answer.toml /path/to/proxmox-ve_9.2-1.iso
+./prepare-auto-iso.sh nodes/pve01.answer.toml /path/to/proxmox-ve_9.2-1.iso
 
 # 3. build the payload on the PXE server
 scp proxmox-ve_9.2-1-auto.iso user@pxe:/srv/pxe/iso/
@@ -175,7 +175,7 @@ sudo pxectl proxmox-auto
 
 **`proxmox-auto-install-assistant` is amd64-only** — Proxmox publishes no arm64
 index at all, so on an arm64 PXE server or an Apple Silicon Mac it cannot be
-installed. `prepare-auto-iso.sh` therefore runs it inside a
+installed. `new_machine_onboarding/prepare-auto-iso.sh` therefore runs it inside a
 `--platform linux/amd64` container. It's emulated and takes a few minutes, but
 it's a one-off, and it does not have to run on the PXE server.
 
@@ -195,8 +195,12 @@ it inside the provisioning loop instead would leave a half-provisioned batch —
 and since the password is written first, that is real state to clean up. It generates the password and
 **writes it to `secrets/<name>.env` before doing anything else** —
 a random 32-character password that exists only as a hash is a password you
-have lost, along with the node it installs. `secrets/`, `nodes/`, `nodes.env`
-and `nodes.yaml` are all gitignored.
+have lost, along with the node it installs. `new_machine_onboarding/secrets/`,
+`nodes/`, `nodes.env` and `nodes.yaml` are all gitignored.
+
+The full walkthrough — from a bare PC to a running node, and what to check when
+it does not boot — is in
+[`new_machine_onboarding/README.md`](new_machine_onboarding/README.md).
 
 The YAML reader is a **documented subset** parsed with the stdlib, not PyYAML —
 which is absent from a stock macOS and DietPi Python, and on 3.14 needs a venv

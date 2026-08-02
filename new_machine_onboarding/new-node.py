@@ -35,10 +35,12 @@ import string
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))   # new_machine_onboarding/
 REPO = os.path.dirname(HERE)
-SECRETS_DIR = os.path.join(REPO, "secrets")
-NODES_DIR = os.path.join(REPO, "nodes")
+# Per-node state lives beside this script, not at the repo root, so everything
+# to do with onboarding a machine is in one directory. Both are gitignored.
+SECRETS_DIR = os.path.join(HERE, "secrets")
+NODES_DIR = os.path.join(HERE, "nodes")
 
 PW_ALPHABET = string.ascii_letters + string.digits + "._+=@%#-"
 PW_LENGTH = 32
@@ -534,7 +536,7 @@ def main():
     args = ap.parse_args()
 
     cfg = dict(DEFAULTS)
-    cfg.update(load_env_file(os.path.join(REPO, "nodes.env")))
+    cfg.update(load_env_file(os.path.join(HERE, "nodes.env")))
 
     nodes = []
     if args.file:
@@ -573,8 +575,9 @@ def main():
         sys.exit(1)
     if not args.dry_run and nodes:
         print("\nNext:")
-        print("  ./payloads/prepare-auto-iso.sh nodes/<name>.answer.toml <proxmox.iso>")
-        print("  then build-proxmox.sh --iso <that>-auto.iso --name pve-auto")
+        print("  ./new_machine_onboarding/prepare-auto-iso.sh \\")
+        print("      new_machine_onboarding/nodes/<name>.answer.toml <proxmox.iso>")
+        print("  then payloads/build-proxmox.sh --iso <that>-auto.iso --name pve-auto")
         print("  IT WILL ERASE THE TARGET'S DISK WITHOUT ASKING.")
 
 
