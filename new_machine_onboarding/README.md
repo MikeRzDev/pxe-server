@@ -31,7 +31,7 @@ The rest of this document covers the baked path. Fleet mode is below it.
 | `nodes.env.example` | defaults: address range, gateway, DNS, domain |
 | `nodes.yaml.example` | declarative definitions for several machines at once |
 | `answer.toml.example` | annotated answer file, if you'd rather hand-write one |
-| `secrets/` | **gitignored** — one `<name>.env` per node, cleartext root password, mode 0600 |
+| `secrets/<name>/` | **gitignored**, 0700 — that node's `credentials.env` (cleartext root password) and its own `id_ed25519` keypair |
 | `nodes/` | **gitignored** — generated `<name>.answer.toml` files |
 
 ## One-time setup
@@ -64,9 +64,26 @@ already answers a ping, one already claimed in `secrets/`, a malformed range, or
 a pool with fewer free addresses than there are machines all fail immediately,
 having written nothing.
 
-It then generates a 32-character root password and **saves it to
-`secrets/<name>.env` before doing anything else** — a random password that
-exists only as a hash is a password you have lost, along with the node.
+It then generates a 32-character root password **and that machine's own SSH
+keypair**, saving both to `secrets/<name>/` before anything else — a random
+password that exists only as a hash is a password you have lost, along with the
+node. The public half goes into the answer file as `root-ssh-keys`, so the node
+accepts your key the moment it boots:
+
+```
+secrets/fermi/
+  credentials.env     root password (clear + hash), address, ready-made ssh command
+  id_ed25519          private key, 0600
+  id_ed25519.pub      installed for root on that node
+```
+
+One key per machine rather than a shared one: the private half never leaves its
+directory, and decommissioning a node is deleting its folder rather than
+rotating a credential every node shares.
+
+```bash
+ssh -i secrets/fermi/id_ed25519 root@192.0.2.31
+```
 
 ### 2. Bake the ISO
 
