@@ -238,18 +238,25 @@ fi
 # KOPTS. \${base-url} is an iPXE variable and must reach the file unexpanded.
 COPY=whole      # whole | subtree | subtree_keep | files | bootdirs
 SUBTREE=""; FILES=(); KERNEL=""; INITRDS=(); KOPTS=""; NOTE=""; SERVE_ISO=0
+# KERNEL/INITRDS are written into the boot script relative to the payload dir.
+# For archiso the payload dir is the basedir's CONTENTS, so those paths are one
+# level down from the mount and need this prefix to be checked against it.
+SRC_PREFIX=""
 
 case "$FAMILY" in
 archiso)
     # Copy the basedir's CONTENTS into http/<name>/, which makes <name> the
     # archisobasedir; archiso then fetches http://ip/<name>/x86_64/airootfs.sfs.
-    SUBTREE="$ARCHISO_DIR"; COPY=subtree
+    SUBTREE="$ARCHISO_DIR"; COPY=subtree; SRC_PREFIX="$ARCHISO_DIR/"
     KERNEL="$(firstglob "$ARCHISO_DIR/boot/x86_64/vmlinuz*" || true)"; KERNEL="${KERNEL#"$ARCHISO_DIR"/}"
+    # Microcode images are optional and load BEFORE the real initramfs, so they
+    # are collected first - but they must not be mistaken for it below.
     for u in intel_ucode.img amd_ucode.img; do
         have "$ARCHISO_DIR/boot/$u" && INITRDS+=("boot/$u")
     done
     main="$(firstglob "$ARCHISO_DIR/boot/x86_64/*.img" || true)"
     [ -n "$main" ] && INITRDS+=("${main#"$ARCHISO_DIR"/}")
+    MAIN_INITRD="$main"
     KOPTS="archisobasedir=$NAME archiso_http_srv=\${base-url}/ ip=dhcp checksum"
     NOTE="Runs entirely in RAM. Add copytoram to free the server after boot."
     ;;
@@ -313,12 +320,40 @@ esac
 
 [ "$WHOLE" -eq 1 ] && { COPY=whole; SERVE_ISO=0; }
 
-if [ "$FAMILY" != unknown ] && { [ -z "$KERNEL" ] || [ -z "${INITRDS[0]:-}" ]; }; then
-    echo "prepare-iso.sh: family '$FAMILY' was detected but its kernel/initrd are" >&2
-    echo "                not where that family puts them. Found in the image:" >&2
-    find "$MNT" \( -name 'vmlinuz*' -o -name 'linux' -o -name 'initrd*' \) -type f \
-        -printf '                  %P\n' 2>/dev/null | head -20 >&2
-    exit 1
+# Verify the recipe against the image before touching anything. Some families
+# glob for their kernel, but anaconda and debian-installer hard-code the paths
+# their family always uses - so a non-empty path is NOT evidence the file is
+# there. Without this the miss surfaces as a `cp` failure part-way through the
+# copy, leaving a half-built payload behind.
+if [ "$FAMILY" != unknown ]; then
+    MISSING=()
+    if [ -z "$KERNEL" ]; then MISSING+=("<kernel>")
+    elif [ ! -e "$MNT/$SRC_PREFIX$KERNEL" ]; then MISSING+=("$KERNEL")
+    fi
+
+    if [ "${#INITRDS[@]}" -eq 0 ] || [ -z "${INITRDS[0]:-}" ]; then
+        MISSING+=("<initrd>")
+    else
+        for i in "${INITRDS[@]}"; do
+            [ -e "$MNT/$SRC_PREFIX$i" ] || MISSING+=("$i")
+        done
+    fi
+
+    # archiso collects optional microcode images into INITRDS too, so a
+    # non-empty list does not prove the real initramfs was found.
+    [ "$FAMILY" = archiso ] && [ -z "${MAIN_INITRD:-}" ] && MISSING+=("<initramfs>")
+
+    if [ "${#MISSING[@]}" -gt 0 ]; then
+        echo "prepare-iso.sh: this looks like a '$FAMILY' image, but these are not" >&2
+        echo "                where that family puts them:" >&2
+        printf '                  %s\n' "${MISSING[@]}" >&2
+        echo "                Kernels and initrds actually in the image:" >&2
+        find "$MNT" \( -name 'vmlinuz*' -o -name 'linux' -o -name 'initrd*' -o -name '*.img' \) \
+            -type f -printf '                  %P\n' 2>/dev/null | sort | head -20 >&2
+        echo "                Use --family to force a different one, or write the" >&2
+        echo "                boot script by hand from boot-EXAMPLE.ipxe." >&2
+        exit 1
+    fi
 fi
 
 # The unknown-family boot script lists what is in the image, and the listing

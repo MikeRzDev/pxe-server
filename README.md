@@ -36,6 +36,7 @@ sudo ./install.sh                    # apply
 
 sudo ./payloads/build-proxmox.sh     # ~1.7 GB ISO -> 2.0 GB initrd
 sudo ./payloads/build-rescue.sh      # optional, ~1.4 GB ISO -> 1.3 GB tree
+sudo ./payloads/prepare-iso.sh NAME ISO_OR_URL    # anything else
 
 sudo pxectl list                     # what is installed
 ~/scripts/pxe.sh proxmox
@@ -83,7 +84,8 @@ the workers running — see the last section for why.
 | `nodes.yaml.example` | declarative node definitions for `new-node.py --file` |
 | `payloads/prepare-auto-iso.sh` | bake an answer file into an ISO (runs the amd64-only assistant in Docker) |
 | `payloads/answer.toml.example` | annotated answer file, validated against 9.2.7 |
-| `payloads/fetch-iso.sh` | **generic**: download any ISO and unpack it into the HTTP root |
+| `payloads/prepare-iso.sh` | **generic**: take any ISO (file or URL), detect its family, unpack it and write a working `boot-<name>.ipxe` |
+| `payloads/fetch-iso.sh` | the manual version: download any ISO and unpack it, writing no boot script |
 | `payloads/build-proxmox.sh` | example: fetch the ISO, build the initrd with the ISO embedded |
 | `payloads/build-rescue.sh` | example: fetch the ISO, unpack the archiso tree |
 | `templates/` | every config file, with `@@PLACEHOLDER@@` values |
@@ -109,28 +111,43 @@ any survive rendering:
 
 ## Adding another image
 
+Point `prepare-iso.sh` at an ISO — a local file or a URL — and it does the
+whole thing: works out the installer family, copies only what that family
+needs, and **writes a working `boot-<name>.ipxe`**.
+
 ```bash
-# 1. get the files
-sudo ./payloads/fetch-iso.sh debian13 https://.../debian-13-netinst.iso
-#    it prints the kernels and initrds it found
-
-# 2. describe how to boot them
-sudo cp /srv/pxe/http/boot-EXAMPLE.ipxe /srv/pxe/http/boot-debian13.ipxe
-sudo $EDITOR /srv/pxe/http/boot-debian13.ipxe
-
-# 3. that's it
-sudo pxectl list
-sudo pxectl debian13
+sudo ./payloads/prepare-iso.sh rocky10 https://.../Rocky-10-x86_64-dvd.iso
+sudo ./payloads/prepare-iso.sh arch    /srv/pxe/iso/archlinux.iso --start
 ```
 
-To make it survive a rebuild, drop the same `boot-debian13.ipxe` into
-`templates/srv/pxe/http/` here and re-run `install.sh` — it renders every
-`boot-*.ipxe` it finds.
+| Family | Detected by | Command line it writes |
+|---|---|---|
+| `archiso` | `<dir>/x86_64/airootfs.sfs` | `archisobasedir=` + `archiso_http_srv=` |
+| `anaconda` | `.treeinfo`, `images/pxeboot/` | `inst.repo=` |
+| `casper` | `casper/` | `url=<the ISO>` — serves the ISO, does not unpack it |
+| `alpine` | `apks/` | `alpine_repo=` + `modloop=` |
+| `live` | `live/` | `boot=live fetch=<squashfs>` |
+| `debian-netboot` | a `netboot.tar.gz` | `ip=dhcp` — the reliable Debian path |
+| `debian-installer` | `install.amd/` | `ip=dhcp`, and warns that this initrd wants media |
+| `proxmox` | `boot/linux26` | refused — see below |
 
-The only genuinely image-specific part is the **kernel command line**;
-`boot-EXAMPLE.ipxe` lists the patterns for the Debian/Ubuntu, archiso,
-anaconda and boot-the-whole-ISO-from-a-ramdisk families. `fetch-iso.sh`
-deliberately does not guess it — a wrong guess fails confusingly at boot.
+Useful flags: `--dry-run` prints the boot script without changing anything,
+`--start` serves it immediately, `--family` overrides detection, and
+`--emit-template` also writes the `@@SERVER_IP@@` form into
+`templates/srv/pxe/http/` so `install.sh` recreates it on a rebuild.
+
+It **refuses Proxmox ISOs** on purpose and points at `build-proxmox.sh`: that
+payload needs the ISO embedded in the initrd, which is surgery, not a cmdline.
+
+An image it does not recognise still gets unpacked and still gets a
+`boot-<name>.ipxe`, but with the command line left **blank**, every kernel and
+initrd in the image listed in the file as comments, and `NOT BOOTABLE` in its
+`pxectl list` description. It exits `3` to say so. Guessing a command line is
+how you get a boot that fails confusingly, so it does not guess — fill in the
+blank using `boot-EXAMPLE.ipxe`, which lists what each family expects.
+
+`fetch-iso.sh` is still there for the same job done by hand: it unpacks an ISO
+from a URL, prints the kernels and initrds it found, and writes no boot script.
 
 Two optional header comments are the only metadata `pxectl` reads:
 
