@@ -228,6 +228,52 @@ curl http://<pxe-server>:8080/health          # answer count
 sudo -A journalctl -u pxe-answer -f              # one line per request
 ```
 
+## The credential store, and why it is guarded
+
+`secrets/<node>/` holds the **only** copy of each node's root password and SSH
+key. `new-node.py` mints them once from a CSPRNG; the answer file keeps only a
+hash. Lose the directory and the node is unreachable — there is no
+regeneration path, only a console password reset or a reinstall.
+
+On 2026-09-02 exactly that happened: the private keys and `credentials.env`
+for fermi, dirac and lawrence disappeared from this store (only
+`id_ed25519.pub` survived), and the Mac's mirror was then overwritten with the
+same emptiness by its `sync-from-pi.sh`, which built files with `base64 -w0`
+of a missing file — an empty string that `base64 -d` happily wrote as a
+0-byte key while every command still exited 0.
+
+`scripts/secrets-guard.sh` exists so that cannot recur:
+
+```bash
+~/scripts/secrets-guard.sh verify        # does every stored key parse + match its .pub?
+~/scripts/secrets-guard.sh backup        # snapshot -> /var/backups/pxe-secrets/<utc>/
+~/scripts/secrets-guard.sh restore       # refill gaps from the newest good snapshot
+~/scripts/secrets-guard.sh list          # which snapshots hold a good copy of what
+sudo -A ~/scripts/secrets-guard.sh unprotect fermi   # before a deliberate rotation
+```
+
+Four properties, and each one is load-bearing:
+
+- **Snapshots live outside this repo** (`/var/backups/pxe-secrets`), so a
+  re-clone, `uninstall.sh`, or `rm -rf ~/pxe-server` cannot take them along.
+- **Last-good copies are pinned.** Retention keeps the newest `KEEP=60`
+  snapshots *plus* the newest snapshot holding a good copy of each node ever
+  seen — including nodes no longer in the store. The copy you need after a
+  loss is exactly the one a dumb retention policy would delete.
+- **Everything is `chattr +i`.** Live secrets and snapshots are immutable, so
+  a stray `rm -rf` fails instead of succeeding. A real rotation has to say
+  `unprotect` first, on purpose.
+- **`new-node.py` snapshots the moment credentials hit disk**, and
+  `pxe-secrets-guard.timer` re-verifies hourly and silently restores anything
+  that vanished. A failed unit means a genuinely unrecoverable loss.
+
+The Mac mirror (`Manhattan/`) runs the same four rules under
+`credentials-guard.sh`, and `Manhattan/restore-to-pi.sh` pushes back the other
+way when this store is the one with the gap.
+
+Snapshots are cleartext credentials, exactly like the originals: `0700`, this
+host only, never in git.
+
 ## Requirements on the target
 
 - **UEFI**, not legacy BIOS.

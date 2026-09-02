@@ -117,6 +117,7 @@ render() {
         -e "s|@@LAN_NET@@|$LAN_NET|g" \
         -e "s|@@IFACE@@|$IFACE|g" \
         -e "s|@@SERVER_NAME@@|$SERVER_NAME|g" \
+        -e "s|@@PXE_HOME@@|$PXE_HOME|g" \
         -e "s|@@ANSWER_DIR@@|$ANSWER_DIR|g" \
         -e "s|@@ANSWER_PORT@@|$ANSWER_PORT|g" \
         "$src" > "$tmp"
@@ -220,6 +221,17 @@ step "answer server (fleet mode)"
 render "$HERE/templates/usr/local/sbin/pxe-answer-server" /usr/local/sbin/pxe-answer-server 0755
 render "$HERE/templates/etc/systemd/system/pxe-answer.service" /etc/systemd/system/pxe-answer.service 0644
 
+step "credential-store guard"
+# secrets/<node>/ is the ONLY copy of every node's root password and SSH key:
+# new-node.py generates them once from a CSPRNG and nothing can regenerate
+# them. Snapshots therefore live OUTSIDE this repo, under /var/backups, where
+# neither uninstall.sh (which removes $PXE_ROOT) nor a re-clone can take them
+# with it. Owned by $PXE_USER so new-node.py can snapshot without sudo; the
+# hourly root timer is what makes the copies immutable.
+RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0700 /var/backups/pxe-secrets
+render "$HERE/templates/etc/systemd/system/pxe-secrets-guard.service" /etc/systemd/system/pxe-secrets-guard.service 0644
+render "$HERE/templates/etc/systemd/system/pxe-secrets-guard.timer"   /etc/systemd/system/pxe-secrets-guard.timer 0644
+
 step "wrapper scripts -> $PXE_HOME/scripts"
 RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_HOME/scripts"
 for s in "$HERE"/scripts/*.sh; do
@@ -228,6 +240,15 @@ for s in "$HERE"/scripts/*.sh; do
 done
 
 RUN systemctl daemon-reload
+
+step "arm the credential-store timer (hourly verify + snapshot)"
+RUN systemctl enable --now pxe-secrets-guard.timer
+if [ "$DRY_RUN" -eq 0 ] && [ -d "$PXE_HOME/pxe-server/new_machine_onboarding/secrets" ]; then
+    ONBOARD_DIR="$PXE_HOME/pxe-server/new_machine_onboarding" \
+    ANSWER_DIR="$ANSWER_DIR" BACKUP_ROOT=/var/backups/pxe-secrets \
+        "$PXE_HOME/scripts/secrets-guard.sh" backup --reason "install.sh" || \
+        echo "    (initial snapshot failed - run secrets-guard.sh backup by hand)"
+fi
 
 # ------------------------------------------------------------- 6 firewall ---
 step "firewall"
