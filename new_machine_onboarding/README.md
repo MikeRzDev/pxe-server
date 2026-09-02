@@ -261,18 +261,16 @@ puts the answer file in place **before** the target boots, so a single power-on
 installs — no second reboot:
 
 ```bash
-~/scripts/onboard-admin.sh <name> --mac <MAC> --ip <address>   # one power-on
-~/scripts/onboard-admin.sh <name> --any-mac  --ip <address>   # MAC unknown
-~/scripts/onboard-admin.sh <name> --ip <address>              # two-pass fallback
+~/scripts/onboard-admin.sh <name> --ip <address>
 ```
 
-The modes are shared with `onboard-node.sh` — both wrappers are a few lines over
-`scripts/onboard-lib.sh`, which is where they are documented. In short: `--mac`
-writes the answer before the machine boots so a single power-on installs it;
-`--any-mac` does the same without knowing the MAC by serving `default.toml`,
-which matches **every** machine until the target collects it and the script
-narrows it to `<mac>.toml`; and with neither flag it falls back to 404-discovery
-plus a second manual reboot.
+One power-on, and the MAC does not need to be known: a netbooting machine shows
+up in dnsmasq's log about 90 seconds before the installer asks for its answer
+file, so the MAC is caught from that DHCP request and the answer written into
+the same boot. The modes are shared with `onboard-node.sh` — both wrappers are
+a few lines over `scripts/onboard-lib.sh`, which documents `--mac` (skip the
+race), `--two-pass` (the old 404-discovery flow) and `--any-mac` (a wildcard
+that is rarely the right answer now).
 
 `--product pdm` only selects the product name and the web UI port; it records
 `NODE_PRODUCT=pdm` and `NODE_URL=https://<ip>:8443` in `credentials.env` so the
