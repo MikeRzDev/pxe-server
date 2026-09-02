@@ -240,7 +240,10 @@ for fermi, dirac and lawrence disappeared from this store (only
 `id_ed25519.pub` survived), and the Mac's mirror was then overwritten with the
 same emptiness by its `sync-from-pi.sh`, which built files with `base64 -w0`
 of a missing file — an empty string that `base64 -d` happily wrote as a
-0-byte key while every command still exited 0.
+0-byte key while every command still exited 0. All three were recovered the
+same day from an unrelated copy the operator happened to keep — nothing in
+this repo would have brought them back, which is the whole reason for the
+guard described here.
 
 `scripts/secrets-guard.sh` exists so that cannot recur:
 
