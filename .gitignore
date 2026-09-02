@@ -87,3 +87,6 @@ new_machine_onboarding/FLEET.md
 nodes.yaml
 nodes.yml
 nodes.json
+
+# Python bytecode (py_compile syntax checks)
+__pycache__/

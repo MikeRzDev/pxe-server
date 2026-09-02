@@ -1,0 +1,79 @@
+#!ipxe
+# pxe-description: Proxmox Datacenter Manager 1.1-1 FLEET (answer over HTTP) - WIPES THE TARGET DISK
+# pxe-payload-dir: pdm-fleet
+#
+# Unattended Proxmox Datacenter Manager install, served by @@SERVER_NAME@@ (@@SERVER_IP@@).
+#
+# ###########################################################################
+# # THIS DESTROYS THE TARGET MACHINE'S DISK WITH NO CONFIRMATION.           #
+# # It partitions and formats according to the answer file the server hands #
+# # it. Any machine that netboots this loses its data. Serve it only when   #
+# # you mean to, and stop the server afterwards:  ~/scripts/pxe-stop.sh     #
+# ###########################################################################
+#
+# PDM is the admin/management product, not a hypervisor - it manages the PVE
+# nodes from one pane. It is a WHOLE-DISK install like PVE, so it needs its own
+# machine (the "admin node"), not a spare partition on one of them.
+#
+# ###########################################################################
+# # WHILE THIS PAYLOAD IS ARMED, IT IS THE ONLY THING SERVED. A PVE node    #
+# # that netboots now gets the PDM installer paired with its own PVE answer #
+# # file. Arm it only while installing the admin node, then pxe-stop.sh.    #
+# ###########################################################################
+#
+# FLEET mode, same as boot-proxmox-fleet.ipxe: this image carries NO answer
+# file. The installer POSTs a description of itself - including every NIC's MAC
+# - to the answer server, which replies with that machine's answer file. The
+# answer server is shared with the PVE payloads and keys purely on MAC, so a
+# PDM node and a PVE node coexist in /srv/pxe/answers/ without conflict.
+#
+# Build it ONCE with:
+#   ./new_machine_onboarding/prepare-auto-iso.sh --http http://SERVER:8080/answer \
+#        proxmox-datacenter-manager_1.1-1.iso
+#   sudo ./payloads/build-pdm.sh \
+#        --iso .../proxmox-datacenter-manager_1.1-1-fleet.iso --name pdm-fleet
+#
+# Then, for the admin node: ~/scripts/onboard-admin.sh <name>
+
+set base-url http://@@SERVER_IP@@
+set kbase ro ramdisk_size=16777216 rw quiet splash=silent
+
+:start
+menu Proxmox Datacenter Manager 1.1-1  --  FLEET install  (@@SERVER_NAME@@)
+item --gap --                 *** THIS ERASES THE DISK OF THIS MACHINE ***
+item auto                     Install now, unattended            [default in 15s]
+item --gap --                 Get out
+item abort                    Abort - drop to an iPXE shell, change nothing
+item reboot                   Reboot
+choose --timeout 15000 --default auto selected || goto auto
+goto ${selected}
+
+:auto
+set kopts ${kbase} proxmox-start-auto-installer
+goto load
+
+:load
+echo
+echo Loading the UNATTENDED Proxmox Datacenter Manager 1.1-1 installer.
+echo   cmdline : ${kopts}
+echo   client  : ${net0/mac}  ${ip}
+echo
+echo This machine's disk is about to be erased. Power it off NOW to stop.
+echo
+sleep 5
+kernel ${base-url}/pdm-fleet/linux26 ${kopts} || goto failed
+initrd ${base-url}/pdm-fleet/initrd || goto failed
+boot || goto failed
+
+:failed
+echo
+echo BOOT FAILED - dropping to an iPXE shell. Nothing was written.
+echo Try:  imgfetch ${base-url}/pdm-fleet/linux26
+echo
+
+:abort
+echo Aborted. The disk was not touched.
+shell
+
+:reboot
+reboot

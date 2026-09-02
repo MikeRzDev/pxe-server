@@ -1,6 +1,11 @@
 #!/bin/bash
-# prepare-auto-iso.sh - bake an answer file into a Proxmox VE ISO so the
+# prepare-auto-iso.sh - bake an answer file into a Proxmox installer ISO so the
 # installer runs UNATTENDED.
+#
+# Product-agnostic: any ISO carrying an `auto-installer-capable` marker in its
+# root works, so this takes a Proxmox Datacenter Manager ISO exactly as it
+# takes a Proxmox VE one. Only the payload builder differs afterwards
+# (build-proxmox.sh vs build-pdm.sh).
 #
 #   ./prepare-auto-iso.sh nodes/pve01.answer.toml proxmox-ve_9.2-1.iso [out.iso]
 #   ./prepare-auto-iso.sh --validate answer.toml       # syntax-check only
@@ -84,6 +89,23 @@ if [ "$VALIDATE_ONLY" -eq 0 ]; then
     fi
 fi
 
+# Which builder and payload the trailers below should point at. PVE and PDM
+# ISOs go through this script identically; only the next step differs, and
+# printing the PVE one after preparing a PDM ISO is how you end up with a
+# hypervisor payload sitting under a manager's name.
+case "$(basename "${SRC_ISO:-}")" in
+    *datacenter-manager*)
+        BUILDER=build-pdm.sh;     FLEET_PAYLOAD=pdm-fleet;     AUTO_PAYLOAD=pdm ;;
+    *)
+        BUILDER=build-proxmox.sh; FLEET_PAYLOAD=proxmox-fleet; AUTO_PAYLOAD=proxmox-auto ;;
+esac
+# For both products the payload directory name matches the pxectl payload name,
+# except PVE's baked variant, which is historically "pve-auto" not "proxmox-auto".
+FLEET_DIR="$FLEET_PAYLOAD"
+[ "$FLEET_PAYLOAD" = "proxmox-fleet" ] && FLEET_DIR=pve-fleet
+AUTO_DIR="$AUTO_PAYLOAD"
+[ "$AUTO_PAYLOAD" = "proxmox-auto" ] && AUTO_DIR=pve-auto
+
 command -v docker >/dev/null || {
     echo "prepare-auto-iso.sh: docker is required (the assistant is amd64-only)." >&2
     echo "  Alternatively run proxmox-auto-install-assistant directly on any amd64 Debian host." >&2
@@ -159,8 +181,8 @@ if [ -n "$HTTP_URL" ]; then
 Build the payload ONCE, then enrol machines by writing answer files:
 
   scp $ISO_DIR/$OUT_FILE <user>@<pxe>:/srv/pxe/iso/
-  sudo -A ~/pxe-server/payloads/build-proxmox.sh --iso /srv/pxe/iso/$OUT_FILE --name pve-fleet
-  sudo -A pxectl proxmox-fleet
+  sudo -A ~/pxe-server/payloads/$BUILDER --iso /srv/pxe/iso/$OUT_FILE --name $FLEET_DIR
+  sudo -A pxectl $FLEET_PAYLOAD
 
   ./new_machine_onboarding/new-node.py <name> --serve   # per machine, no rebuild
 EOF
@@ -190,6 +212,6 @@ cat <<EOF
 Next, on the PXE server:
 
   scp $ISO_DIR/$OUT_FILE <user>@<pxe-server>:/srv/pxe/iso/
-  sudo ~/pxe-server/payloads/build-proxmox.sh --iso /srv/pxe/iso/$OUT_FILE --name pve-auto
-  sudo pxectl proxmox-auto      # <-- this WILL wipe the target's disk
+  sudo ~/pxe-server/payloads/$BUILDER --iso /srv/pxe/iso/$OUT_FILE --name $AUTO_DIR
+  sudo pxectl $AUTO_PAYLOAD      # <-- this WILL wipe the target's disk
 EOF
