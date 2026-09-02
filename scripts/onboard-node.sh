@@ -13,10 +13,13 @@
 # traffic ever reaching this host - if that happens, reboot and pick the other
 # network entry from the one-time boot menu (F11/F12/Esc at POST).
 #
-# Safe by construction up to the confirmation prompt: until an answer file
-# exists for its MAC, any netboot attempt 404s at the answer server and
-# touches nothing on the target. After you confirm and the file is written,
-# the NEXT netboot of that MAC WIPES THE TARGET DISK and installs unattended.
+# Safe by construction up to the point the answer file is written: until
+# then, any netboot attempt 404s at the answer server and touches nothing on
+# the target. As soon as the MAC is captured this script serves the answer
+# file immediately, with default settings (single disk, next free IP) and no
+# confirmation prompt - the NEXT netboot of that MAC WIPES THE TARGET DISK and
+# installs unattended. The 404'd first attempt already told you this was
+# coming; there's nothing left to confirm.
 set -euo pipefail
 
 ONBOARD_DIR="$HOME/pxe-server/new_machine_onboarding"
@@ -56,17 +59,6 @@ fi
 echo "==> captured MAC: $MAC"
 echo
 cd "$ONBOARD_DIR"
-sudo ./new-node.py "$NAME" --mac "$MAC" "$@" --dry-run
-echo
-read -rp "Write + serve this answer file? [y/N] " CONFIRM
-case "$CONFIRM" in
-    y | Y) ;;
-    *)
-        echo "Aborted - nothing written."
-        exit 1
-        ;;
-esac
-
 sudo ./new-node.py "$NAME" --mac "$MAC" "$@" --serve
 
 cat <<MSG
