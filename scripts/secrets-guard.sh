@@ -8,6 +8,7 @@
 #     ~/scripts/secrets-guard.sh list [node]      # snapshots, and which hold a good copy
 #     sudo ~/scripts/secrets-guard.sh protect     # chattr +i every stored secret
 #     sudo ~/scripts/secrets-guard.sh unprotect [node...]
+#     ~/scripts/secrets-guard.sh forget NODE     # credentials really are gone, stop alarming
 #
 # WHY THIS EXISTS. secrets/<node>/ holds the ONLY copy of a node's root
 # password and SSH key - new-node.py generates them once, from a CSPRNG, and
@@ -41,6 +42,13 @@ KEEP="${KEEP:-60}"
 # The three files that make up one node's identity. id_ed25519.pub alone is
 # worthless - it is the public half; losing the other two loses the node.
 FILES=(id_ed25519 id_ed25519.pub credentials.env)
+
+# A node whose credentials are genuinely gone would otherwise fail every check
+# forever, and an alarm that is always on is an alarm nobody reads. `forget`
+# records that you know - verify then reports it as written off instead of
+# BAD. Restore still tries it: if a copy ever turns up, it comes back.
+WRITTEN_OFF="$BACKUP_ROOT/WRITTEN-OFF"
+is_written_off() { [ -f "$WRITTEN_OFF" ] && grep -qxF "$1" "$WRITTEN_OFF" 2>/dev/null; }
 
 say()  { echo "$*"; }
 warn() { echo "secrets-guard: $*" >&2; }
@@ -94,6 +102,8 @@ cmd_verify() {
         why="$(node_why "$SECRETS_DIR/$n")"
         if [ "$why" = ok ]; then
             printf '  %-12s ok\n' "$n"
+        elif is_written_off "$n"; then
+            printf '  %-12s lost, acknowledged - %s\n' "$n" "$why"
         else
             printf '  %-12s BAD - %s\n' "$n" "$why"
             bad=$((bad + 1))
@@ -117,6 +127,9 @@ cmd_backup() {
         esac
     done
 
+    # A backup that silently finds nothing is how you discover, months later,
+    # that you have no backups. Wrong path = hard failure, not "0 nodes".
+    [ -d "$SECRETS_DIR" ] || die "no secrets dir at $SECRETS_DIR - refusing to write an empty snapshot (set ONBOARD_DIR)"
     install -d -m 0700 "$BACKUP_ROOT" 2>/dev/null || die "cannot create $BACKUP_ROOT"
     stamp="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
     snap="$BACKUP_ROOT/$stamp"
@@ -146,6 +159,10 @@ cmd_backup() {
 
     chmod -R go-rwx "$snap"
     say "  snapshot -> $snap  ($copied node(s), reason: $reason)"
+    if [ "$copied" -eq 0 ] && [ -n "$(live_nodes)" ]; then
+        warn "SNAPSHOT IS EMPTY but $SECRETS_DIR has node folders - none of them verify."
+        warn "this snapshot protects nothing; run 'verify' now."
+    fi
 
     prune
     is_root && protect_backups || true
@@ -284,7 +301,28 @@ cmd_autoheal() {
     return "$rc"
 }
 
-usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+cmd_forget() {
+    [ $# -gt 0 ] || die "forget: name at least one node"
+    install -d -m 0700 "$BACKUP_ROOT" 2>/dev/null || true
+    for n in "$@"; do
+        is_written_off "$n" && { say "  $n already written off"; continue; }
+        echo "$n" >> "$WRITTEN_OFF"
+        say "  $n written off - verify will stop calling it a failure"
+    done
+    warn "this does not recover anything: those credentials are still gone"
+}
+
+cmd_unforget() {
+    [ $# -gt 0 ] || die "unforget: name at least one node"
+    [ -f "$WRITTEN_OFF" ] || die "nothing has been written off"
+    for n in "$@"; do
+        grep -vxF "$n" "$WRITTEN_OFF" > "$WRITTEN_OFF.tmp" || true
+        mv -f "$WRITTEN_OFF.tmp" "$WRITTEN_OFF"
+        say "  $n is back under watch"
+    done
+}
+
+usage() { sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 case "${1:-}" in
     verify)    shift; cmd_verify "$@" ;;
@@ -294,6 +332,8 @@ case "${1:-}" in
     unprotect) shift; cmd_unprotect "$@" ;;
     list)      shift; cmd_list "$@" ;;
     autoheal)  shift; cmd_autoheal "$@" ;;
+    forget)    shift; cmd_forget "$@" ;;
+    unforget)  shift; cmd_unforget "$@" ;;
     -h|--help|"") usage 0 ;;
     *) warn "unknown command '$1'"; usage 1 ;;
 esac
