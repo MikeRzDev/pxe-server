@@ -261,15 +261,18 @@ puts the answer file in place **before** the target boots, so a single power-on
 installs — no second reboot:
 
 ```bash
-~/scripts/onboard-admin.sh <name> --mac <MAC> --ip <address>   # preferred
+~/scripts/onboard-admin.sh <name> --mac <MAC> --ip <address>   # one power-on
 ~/scripts/onboard-admin.sh <name> --any-mac  --ip <address>   # MAC unknown
-~/scripts/onboard-admin.sh <name> --two-pass --ip <address>   # old 404-discovery flow
+~/scripts/onboard-admin.sh <name> --ip <address>              # two-pass fallback
 ```
 
-A mode is required. `--any-mac` serves `default.toml`, which matches **every**
-machine — the script narrows it to `<mac>.toml` and disarms PXE the instant the
-target collects it, but during that window anything netbooting on the LAN is
-wiped. `--two-pass` avoids the wildcard at the cost of a second manual reboot.
+The modes are shared with `onboard-node.sh` — both wrappers are a few lines over
+`scripts/onboard-lib.sh`, which is where they are documented. In short: `--mac`
+writes the answer before the machine boots so a single power-on installs it;
+`--any-mac` does the same without knowing the MAC by serving `default.toml`,
+which matches **every** machine until the target collects it and the script
+narrows it to `<mac>.toml`; and with neither flag it falls back to 404-discovery
+plus a second manual reboot.
 
 `--product pdm` only selects the product name and the web UI port; it records
 `NODE_PRODUCT=pdm` and `NODE_URL=https://<ip>:8443` in `credentials.env` so the
