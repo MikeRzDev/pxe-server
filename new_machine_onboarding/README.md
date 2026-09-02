@@ -256,11 +256,20 @@ sudo ~/pxe-server/payloads/build-pdm.sh \
 ```
 
 Then enrol the machine with the PDM wrapper, which arms `pdm-fleet` and passes
-`--product pdm` through to `new-node.py`:
+`--product pdm` through to `new-node.py`. Unlike `onboard-node.sh`, this one
+puts the answer file in place **before** the target boots, so a single power-on
+installs — no second reboot:
 
 ```bash
-~/scripts/onboard-admin.sh <name> --ip <address>
+~/scripts/onboard-admin.sh <name> --mac <MAC> --ip <address>   # preferred
+~/scripts/onboard-admin.sh <name> --any-mac  --ip <address>   # MAC unknown
+~/scripts/onboard-admin.sh <name> --two-pass --ip <address>   # old 404-discovery flow
 ```
+
+A mode is required. `--any-mac` serves `default.toml`, which matches **every**
+machine — the script narrows it to `<mac>.toml` and disarms PXE the instant the
+target collects it, but during that window anything netbooting on the LAN is
+wiped. `--two-pass` avoids the wildcard at the cost of a second manual reboot.
 
 `--product pdm` only selects the product name and the web UI port; it records
 `NODE_PRODUCT=pdm` and `NODE_URL=https://<ip>:8443` in `credentials.env` so the
