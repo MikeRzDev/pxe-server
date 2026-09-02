@@ -268,6 +268,7 @@ Done.$([ "$DRY_RUN" -eq 1 ] && echo "  (dry run - nothing was changed)")
 Next: install a payload. These download multi-GB ISOs, so they are separate.
 
     sudo $HERE/payloads/build-proxmox.sh          # ~1.7 GB ISO -> 2.0 GB initrd
+    sudo $HERE/payloads/build-pdm.sh              # Datacenter Manager (admin node)
     sudo $HERE/payloads/build-rescue.sh           # ~1.4 GB ISO -> 1.3 GB tree
     sudo $HERE/payloads/prepare-iso.sh NAME ISO   # any other image: file or URL,
                                                   # detects the family and writes

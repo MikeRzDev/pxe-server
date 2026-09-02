@@ -228,6 +228,50 @@ curl http://<pxe-server>:8080/health          # answer count
 sudo -A journalctl -u pxe-answer -f              # one line per request
 ```
 
+## The admin node: Proxmox Datacenter Manager
+
+PDM is the management product for a PVE fleet. It is a **whole-disk install
+like PVE**, so it needs its own machine — you cannot add it to an existing
+node. It installs through exactly the same fleet machinery: its ISO carries the
+same `auto-installer-capable` marker, the same `boot/linux26` + zstd
+`boot/initrd.img` layout, and the same `initrdisoimage="/proxmox.iso"`
+convention, and it uses the same `[global]`/`[network]`/`[disk-setup]` answer
+schema. Only three things differ:
+
+| | Proxmox VE | Datacenter Manager |
+|---|---|---|
+| payload | `proxmox-fleet` (dir `pve-fleet`) | `pdm-fleet` |
+| builder | `payloads/build-proxmox.sh` | `payloads/build-pdm.sh` |
+| web UI | `https://<ip>:8006` | `https://<ip>:8443` |
+
+Build the payload once, from the Mac (the auto-install assistant is amd64-only,
+so `prepare-auto-iso.sh` runs it in Docker — it takes a PDM ISO unchanged):
+
+```bash
+./prepare-auto-iso.sh --http http://<pxe-server>:8080/answer \
+    proxmox-datacenter-manager_1.1-1.iso
+# on the PXE server:
+sudo ~/pxe-server/payloads/build-pdm.sh \
+     --iso /srv/pxe/iso/proxmox-datacenter-manager_1.1-1-fleet.iso --name pdm-fleet
+```
+
+Then enrol the machine with the PDM wrapper, which arms `pdm-fleet` and passes
+`--product pdm` through to `new-node.py`:
+
+```bash
+~/scripts/onboard-admin.sh <name> --ip <address>
+```
+
+`--product pdm` only selects the product name and the web UI port; it records
+`NODE_PRODUCT=pdm` and `NODE_URL=https://<ip>:8443` in `credentials.env` so the
+Manhattan README links to the right port.
+
+The answer server is shared and keys purely on MAC, so PDM and PVE answer files
+coexist in `/srv/pxe/answers/` without conflict. But only **one payload is
+served at a time** — while `pdm-fleet` is armed, a PVE node that netboots gets
+the PDM installer paired with its own PVE answer file. Stop PXE as soon as the
+admin node is in.
+
 ## The credential store, and why it is guarded
 
 `secrets/<node>/` holds the **only** copy of each node's root password and SSH
