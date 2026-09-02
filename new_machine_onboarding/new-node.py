@@ -460,8 +460,12 @@ def snapshot_secrets(reason):
         print("             Run install.sh, then: ~/scripts/secrets-guard.sh backup")
         return
     try:
+        # Pass the store location explicitly: this runs under `sudo
+        # ./new-node.py`, where $HOME is /root and any $HOME-derived guess is
+        # wrong - which would mean no backup, quietly.
+        env = dict(os.environ, ONBOARD_DIR=HERE)
         r = subprocess.run([guard, "backup", "--reason", reason],
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, env=env)
         if r.returncode == 0:
             print("    backup      -> /var/backups/pxe-secrets (snapshot taken)")
         else:

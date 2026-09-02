@@ -32,7 +32,20 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ONBOARD_DIR="${ONBOARD_DIR:-$HOME/pxe-server/new_machine_onboarding}"
+resolve_onboard() {
+    # $HOME is /root under `sudo ./new-node.py` and under systemd, but the
+    # store lives in the PXE user's home. Try the obvious places and take the
+    # first that actually exists rather than inventing a path nobody uses.
+    local c
+    for c in "${ONBOARD_DIR:-}" \
+             "$HOME/pxe-server/new_machine_onboarding" \
+             "$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6)/pxe-server/new_machine_onboarding" \
+             "/home/dietpi/pxe-server/new_machine_onboarding"; do
+        [ -n "$c" ] && [ -d "$c/secrets" ] && { echo "$c"; return; }
+    done
+    echo "${ONBOARD_DIR:-$HOME/pxe-server/new_machine_onboarding}"
+}
+ONBOARD_DIR="$(resolve_onboard)"
 SECRETS_DIR="${SECRETS_DIR:-$ONBOARD_DIR/secrets}"
 NODES_DIR="${NODES_DIR:-$ONBOARD_DIR/nodes}"
 ANSWER_DIR="${ANSWER_DIR:-/srv/pxe/answers}"
@@ -86,6 +99,10 @@ node_why() {
 
 live_nodes() {
     [ -d "$SECRETS_DIR" ] || return 0
+    # The store is root-owned (new-node.py runs under sudo). Reporting "no
+    # nodes" because we cannot read it is how a guard lies to you.
+    [ -r "$SECRETS_DIR" ] && [ -x "$SECRETS_DIR" ] || \
+        die "cannot read $SECRETS_DIR as $(id -un) - run this with sudo"
     find "$SECRETS_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort
 }
 
@@ -230,6 +247,7 @@ cmd_restore() {
         cp -p "$found"/* "$SECRETS_DIR/$n/"
         chmod 0600 "$SECRETS_DIR/$n/id_ed25519" "$SECRETS_DIR/$n/credentials.env"
         chmod 0644 "$SECRETS_DIR/$n/id_ed25519.pub"
+        is_root && chown -R "$(stat -c '%u:%g' "$SECRETS_DIR")" "$SECRETS_DIR/$n" 2>/dev/null || true
         say "  restored $n from $(basename "$(dirname "$(dirname "$found")")")"
         restored=$((restored + 1))
     done
