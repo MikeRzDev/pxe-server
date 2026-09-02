@@ -33,17 +33,18 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 resolve_onboard() {
-    # $HOME is /root under `sudo ./new-node.py` and under systemd, but the
-    # store lives in the PXE user's home. Try the obvious places and take the
-    # first that actually exists rather than inventing a path nobody uses.
+    # $HOME is /root under `sudo ./new-node.py` and UNSET under systemd -
+    # which killed this script outright once, since set -u treats an unset
+    # HOME as fatal. Try the obvious places, tolerate every one of them being
+    # absent, and take the first that actually holds a store.
     local c
     for c in "${ONBOARD_DIR:-}" \
-             "$HOME/pxe-server/new_machine_onboarding" \
+             "${HOME:-}/pxe-server/new_machine_onboarding" \
              "$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6)/pxe-server/new_machine_onboarding" \
              "/home/dietpi/pxe-server/new_machine_onboarding"; do
         [ -n "$c" ] && [ -d "$c/secrets" ] && { echo "$c"; return; }
     done
-    echo "${ONBOARD_DIR:-$HOME/pxe-server/new_machine_onboarding}"
+    echo "${ONBOARD_DIR:-${HOME:-/home/dietpi}/pxe-server/new_machine_onboarding}"
 }
 ONBOARD_DIR="$(resolve_onboard)"
 SECRETS_DIR="${SECRETS_DIR:-$ONBOARD_DIR/secrets}"
