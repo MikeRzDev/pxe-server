@@ -97,12 +97,19 @@ node_why() {
     echo ok
 }
 
+# The store is root-owned (onboard-node.sh runs `sudo ./new-node.py`).
+# Reporting "no nodes" for a store we merely cannot read is how a guard lies
+# to you - so every command that reads the store asserts this FIRST, in the
+# main shell. Doing it inside live_nodes was useless: that only ever runs
+# inside $(...), where die exits the subshell and the caller sails on.
+assert_store_readable() {
+    [ -d "$SECRETS_DIR" ] || die "no secrets dir at $SECRETS_DIR (set ONBOARD_DIR)"
+    [ -r "$SECRETS_DIR" ] && [ -x "$SECRETS_DIR" ] \
+        || die "cannot read $SECRETS_DIR as $(id -un) - run this with sudo"
+}
+
 live_nodes() {
     [ -d "$SECRETS_DIR" ] || return 0
-    # The store is root-owned (new-node.py runs under sudo). Reporting "no
-    # nodes" because we cannot read it is how a guard lies to you.
-    [ -r "$SECRETS_DIR" ] && [ -x "$SECRETS_DIR" ] || \
-        die "cannot read $SECRETS_DIR as $(id -un) - run this with sudo"
     find "$SECRETS_DIR" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort
 }
 
@@ -114,7 +121,7 @@ snapshots() {  # newest first
 # ----------------------------------------------------------------- verify ---
 cmd_verify() {
     local bad=0 n why
-    [ -d "$SECRETS_DIR" ] || die "no secrets dir at $SECRETS_DIR"
+    assert_store_readable
     for n in $(live_nodes); do
         why="$(node_why "$SECRETS_DIR/$n")"
         if [ "$why" = ok ]; then
@@ -146,7 +153,9 @@ cmd_backup() {
 
     # A backup that silently finds nothing is how you discover, months later,
     # that you have no backups. Wrong path = hard failure, not "0 nodes".
-    [ -d "$SECRETS_DIR" ] || die "no secrets dir at $SECRETS_DIR - refusing to write an empty snapshot (set ONBOARD_DIR)"
+    # A backup that silently finds nothing is how you discover, months later,
+    # that you have no backups.
+    assert_store_readable
     install -d -m 0700 "$BACKUP_ROOT" 2>/dev/null || die "cannot create $BACKUP_ROOT"
     stamp="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
     snap="$BACKUP_ROOT/$stamp"
@@ -226,6 +235,7 @@ protect_backups() {
 # Refill only what is missing or broken. A live file that passes verification
 # is never touched, so restore is always safe to run.
 cmd_restore() {
+    assert_store_readable
     local wanted=("$@") n s src restored=0 found
     [ ${#wanted[@]} -eq 0 ] && wanted=($(live_nodes) $(all_backed_up_nodes))
     for n in $(printf '%s\n' "${wanted[@]}" | sort -u); do
@@ -266,6 +276,7 @@ all_backed_up_nodes() {
 # ---------------------------------------------------------------- protect ---
 cmd_protect() {
     is_root || die "protect needs root (chattr +i) - use sudo"
+    assert_store_readable
     local n
     for n in $(live_nodes); do
         chattr -R +i "$SECRETS_DIR/$n" 2>/dev/null \
