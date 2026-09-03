@@ -162,13 +162,18 @@ make -j"$(nproc)" $CROSS bin-x86_64-efi/ipxe.efi EMBED="$WORK/chain.ipxe" >/dev/
 make -j"$(nproc)" $CROSS bin/undionly.kpxe     EMBED="$WORK/chain.ipxe" >/dev/null || \
     echo "    (legacy BIOS build failed - the UEFI one is what modern boards use)"
 
-install -d -m 0755 "$PXE_ROOT/http"
-install -m 0644 bin-x86_64-efi/ipxe.efi "$PXE_ROOT/http/ipxe-chain.efi"
-[ -f bin/undionly.kpxe ] && install -m 0644 bin/undionly.kpxe "$PXE_ROOT/http/ipxe-chain.kpxe"
+# Both roots. HTTP is how a machine fetches it to install on its own ESP
+# (tools/pxe-boot-from-windows.ps1); TFTP is how tools/dhcp-offer-shadow.py
+# hands it out, since a PXE ROM can only fetch its boot file over TFTP.
+install -d -m 0755 "$PXE_ROOT/http" "$PXE_ROOT/tftp"
+for root in "$PXE_ROOT/http" "$PXE_ROOT/tftp"; do
+    install -m 0644 bin-x86_64-efi/ipxe.efi "$root/ipxe-chain.efi"
+    [ -f bin/undionly.kpxe ] && install -m 0644 bin/undionly.kpxe "$root/ipxe-chain.kpxe"
+done
 
 echo
 echo "Done."
-ls -la "$PXE_ROOT/http/ipxe-chain."* 2>/dev/null
+ls -la "$PXE_ROOT/http/ipxe-chain."* "$PXE_ROOT/tftp/ipxe-chain."* 2>/dev/null
 cat <<MSG
 
 Point a machine at it, any of these ways:
