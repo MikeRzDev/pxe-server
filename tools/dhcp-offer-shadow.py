@@ -256,12 +256,55 @@ def build_frame(payload, src_ip, dst_ip='255.255.255.255'):
     return ip + udp
 
 
+def eth_frame(dst_mac, src_mac, ip_packet):
+    return dst_mac + src_mac + struct.pack('!H', ETH_P_IP) + ip_packet
+
+
+def delivery_variants(req, server_ip, server_mac, payload):
+    """Every way of putting this offer in front of the client, cheapest first.
+
+    Broadcast alone is not enough in practice. Plenty of consumer routers drop
+    DHCP *server* traffic (source port 67) arriving from a LAN port - rogue-DHCP
+    protection - which kills the broadcast while leaving ARP and ordinary
+    unicast untouched. Since unicast demonstrably crosses this LAN's router
+    (ssh, TFTP and HTTP all work), the same offer is also sent as unicast:
+
+      1. L2 broadcast, IP 255.255.255.255 - what a DHCP server normally does
+      2. L2 unicast to the client's MAC, IP still 255.255.255.255 - the client's
+         IP stack accepts it exactly as in (1), but the frame is not a broadcast
+         and so is not subject to broadcast flooding rules
+      3. L2 unicast, IP = the address the router just offered it - what a server
+         does for a client that did not set the broadcast flag
+
+    A PXE client matches on xid and chaddr and ignores duplicates, so sending
+    all three costs nothing but three small frames.
+    """
+    bcast = b'\xff' * 6
+    client_mac = req['chaddr'][:6]
+    offered = socket.inet_ntoa(req['yiaddr'])
+    out = [
+        ('L2 broadcast', bcast,
+         build_frame(payload, server_ip, '255.255.255.255')),
+        ('unicast/255.255.255.255', client_mac,
+         build_frame(payload, server_ip, '255.255.255.255')),
+    ]
+    if offered != '0.0.0.0':
+        out.append((f'unicast/{offered}', client_mac,
+                    build_frame(payload, server_ip, offered)))
+    return [(label, eth_frame(dst, server_mac, ip)) for label, dst, ip in out]
+
+
 # ------------------------------------------------------------------- main ----
 def detect_server_ip(iface):
     out = subprocess.run(['ip', '-4', '-o', 'addr', 'show', 'dev', iface],
                          capture_output=True, text=True).stdout
     m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)/', out)
     return m.group(1) if m else None
+
+
+def detect_server_mac(iface):
+    with open(f'/sys/class/net/{iface}/address') as fh:
+        return bytes.fromhex(fh.read().strip().replace(':', ''))
 
 
 def main():
@@ -311,14 +354,11 @@ def main():
     promisc = Promiscuous(args.interface)
     promisc.on()
 
-    tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-    tx.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-    tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    try:
-        tx.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                      args.interface.encode())
-    except PermissionError:
-        pass
+    # AF_PACKET to send too, so the destination MAC can be chosen rather than
+    # left to the kernel's ARP - see delivery_variants().
+    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_IP))
+    tx.bind((args.interface, 0))
+    server_mac = detect_server_mac(args.interface)
 
     print(f"""
 ======================================================================
@@ -392,16 +432,20 @@ def main():
             log('  dry run - not answering')
             continue
 
-        frame = build_frame(build_proxy_offer(pkt, server_ip, args.bootfile),
-                            server_ip)
-        try:
-            tx.sendto(frame, ('255.255.255.255', 0))
-        except OSError as e:
-            log(f'  !! could not send: {e}')
+        offer = build_proxy_offer(pkt, server_ip, args.bootfile)
+        sent = []
+        for label, frame in delivery_variants(pkt, server_ip, server_mac, offer):
+            try:
+                tx.send(frame)
+                sent.append(label)
+            except OSError as e:
+                log(f'  !! could not send ({label}): {e}')
+        if not sent:
             continue
 
         shadowed += 1
         log(f'  -> proxy offer sent: boot {args.bootfile} from {server_ip}')
+        log(f'     as: {", ".join(sent)}')
         if args.once and n >= 1:
             log('shadowed one client (--once). The target should be '
                 'TFTPing now; watch it with:  sudo pxectl log')
