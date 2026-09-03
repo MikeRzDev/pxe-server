@@ -130,7 +130,7 @@ report() {
     root_src="$(findmnt -no SOURCE / 2>/dev/null)"
     [ -n "$root_src" ] && root_disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1 | tr -d ' ')"
 
-    local disks summary="" d
+    local disks summary="" data="" d
     mapfile -t disks < <(lsblk -dn -o NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}')
 
     if [ "${#disks[@]}" -eq 0 ]; then
@@ -208,24 +208,24 @@ report() {
         fi
 
         # ------------------------------------------------------- verdict --
-        local verdict
+        local verdict vcode
         echo ""
         if [ -n "$root_disk" ] && [ "$root_disk" = "$d" ]; then
-            verdict="IN USE (booted from)"
+            verdict="IN USE (booted from)"; vcode=inuse
             echo "    >>> DO NOT INSTALL HERE - the running system booted from this disk. <<<"
         elif [ "$has_ntfs" -eq 1 ] || [ "$has_esp" -eq 1 ]; then
             local what=""
             [ "$has_ntfs" -eq 1 ] && what="an NTFS/Windows filesystem"
             [ "$has_esp" -eq 1 ] && what="${what:+$what and }an EFI System Partition"
-            verdict="WINDOWS/BOOT - keep"
+            verdict="WINDOWS/BOOT - keep"; vcode=windows
             echo "    >>> CAREFUL - this disk carries $what."
             echo "        On a dual-boot build this is the one to KEEP, not the one to install to."
             echo "        Wiping it takes Windows and its boot manager with it. <<<"
         elif [ "$part_count" -eq 0 ]; then
-            verdict="empty - safe"
+            verdict="empty - safe"; vcode=empty
             echo "    EMPTY / uninitialised - nothing here to lose."
         else
-            verdict="has data"
+            verdict="has data"; vcode=data
             echo "    Has partitions but no Windows or EFI marker. Read the labels above"
             echo "    (${labels:-no labels}) - installing here destroys whatever they are."
         fi
@@ -237,6 +237,15 @@ report() {
             echo "    no serial reported - fall back to  --disk $d  and accept that the"
             echo "    name can move if this machine's disks are probed in another order."
         fi
+
+        # One tab-separated row per disk, for onboard-lib.sh to read. The
+        # prose above is for a person; this is so the enrolment flow can tell
+        # a single-disk machine (nothing to decide) from one where a human
+        # must choose, without parsing English.
+        data="$data$(printf 'DISK\t%s\t%s\t%s\t%s\t%s\t%s' \
+            "$dev" "${serial:-}" "$size_b" "$(human "$size_b")" \
+            "${model:-unknown}" "$vcode")
+"
 
         summary="$summary$(printf '  %-12s %-10s %-24s %-20s %s' \
             "$dev" "$(human "$size_b")" "${serial:-?}" "${model:0:20}" "$verdict")
@@ -259,6 +268,21 @@ report() {
     echo "  resolved on the target, so it selects the same physical disk no matter"
     echo "  what the kernel calls it on the boot that actually installs."
     echo ""
+    # ---------------------------------------------------------------------
+    # Machine-readable tail. Fixed format, parsed by onboard-lib.sh; the
+    # version marker is so a future change to these columns is detected
+    # rather than silently misread into a disk selection.
+    # ---------------------------------------------------------------------
+    echo "### SURVEY-DATA v1"
+    for nic in /sys/class/net/*; do
+        [ -e "$nic/address" ] || continue
+        case "$(basename "$nic")" in lo) continue ;; esac
+        [ "$(cat "$nic/carrier" 2>/dev/null)" = "1" ] || continue
+        printf 'MAC\t%s\n' "$(tr -d : < "$nic/address")"
+    done
+    printf '%s' "$data"
+    echo "### END SURVEY-DATA"
+
 }
 
 REPORT="$(report)"

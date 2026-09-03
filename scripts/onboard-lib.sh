@@ -63,6 +63,7 @@ ONBOARD_DIR="$HOME/pxe-server/new_machine_onboarding"
 ANSWERS_DIR="${PXE_ANSWER_DIR:-/srv/pxe/answers}"
 # Release files for machines held in the survey shell. Served by nginx, so a
 # held machine can poll for its own MAC over plain HTTP. See --chain.
+SURVEY_DIR="${PXE_SURVEY_DIR:-/srv/pxe/surveys}"
 GO_DIR="${PXE_GO_DIR:-/srv/pxe/http/go}"
 WAIT_SECS=900
 
@@ -102,22 +103,146 @@ wait_for_log() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# SURVEY: look inside the machine before deciding anything about it.
+#
+# The installer's own POST describes DMI and NICs and says NOTHING about disks,
+# so without this step the server is choosing a disk to erase while blind - and
+# "auto" only means anything at all on a machine with exactly one disk. Two
+# minutes of looking removes both that guess and the MAC race in one go.
+# ---------------------------------------------------------------------------
+
+# Everything already filed, so a report from a previous run is not mistaken for
+# this one. Name plus mtime, because a re-survey of the same machine overwrites
+# its own file rather than adding another.
+_survey_snapshot() {
+    sudo -A -A find "$SURVEY_DIR" -name '*.txt' -printf '%f %T@\n' 2>/dev/null | sort
+}
+
+# Arm the read-only survey payload and wait for a machine to report. Echoes the
+# report's filename. The target holds itself in a rescue shell afterwards,
+# polling to be released, which is what keeps this to a single power-on.
+_survey_run() {
+    local before after new deadline
+
+    # A release file outliving its install would let the machine about to be
+    # surveyed straight back into an installer with nobody deciding that.
+    sudo -A -A find "$GO_DIR" -name '*.txt' -delete 2>/dev/null
+
+    echo "==> arming the read-only survey payload" >&2
+    sudo -A -A pxectl survey >/dev/null || return 1
+    before="$(_survey_snapshot)"
+
+    cat >&2 <<'MSG'
+
+Power the target on now, set to boot from the network via its UEFI
+'PXE IPv4' entry (one-time boot menu: F11/F12/Esc at POST). NOT 'HTTP IPv4' -
+that is a different DHCP vendor class this server never answers.
+
+Nothing is written to the machine. It netboots SystemRescue into RAM,
+inventories its disks, reports back, and then HOLDS, waiting to be told which
+disk to install to.
+
+MSG
+    echo "Waiting up to $((WAIT_SECS / 60)) min..." >&2
+    echo >&2
+
+    deadline=$((SECONDS + WAIT_SECS))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        after="$(_survey_snapshot)"
+        if [ "$after" != "$before" ]; then
+            new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") \
+                   | awk '{print $1}' | tail -1)"
+            [ -n "$new" ] && { printf '%s' "$new"; return 0; }
+        fi
+        # Tight, because the machine starts holding the moment it has reported
+        # and the sooner it is answered the shorter it sits there.
+        sleep 2
+    done
+    return 1
+}
+
+# Pull the machine-readable tail out of a report.
+_survey_field() {  # <report-path> <MAC|DISK>
+    sudo -A -A sed -n '/^### SURVEY-DATA v1$/,/^### END SURVEY-DATA$/p' "$1" \
+        | awk -v k="$2" -F'\t' '$1==k'
+}
+
+# Decide which disk the installer may erase, from the survey's own rows.
+#
+# The rule is deliberately timid: auto-select ONLY when the machine has exactly
+# one disk, because that is the only case with nothing to decide - it is what
+# `--disk auto` already meant, just now confirmed rather than assumed. With
+# several disks it refuses and prints the table, because silently picking one
+# of six is precisely the mistake this whole path exists to prevent.
+#
+# Echoes the chosen serial, or empty with an explanation on stderr.
+_survey_choose_disk() {   # <report-path>
+    local report="$1" rows n
+    rows="$(_survey_field "$report" DISK)"
+    n="$(printf '%s\n' "$rows" | grep -c . )"
+
+    if [ "${n:-0}" -eq 0 ]; then
+        echo "The survey found no disks at all. On an NVMe or hardware-RAID box" >&2
+        echo "that usually means the controller driver is missing - which would" >&2
+        echo "stop the Proxmox installer just as dead." >&2
+        return 1
+    fi
+
+    if [ "$n" -eq 1 ]; then
+        local dev serial size model vcode
+        IFS=$'\t' read -r _ dev serial _ size model vcode <<<"$rows"
+        if [ -z "$serial" ]; then
+            echo "The machine's one disk ($dev, $size) reports no serial, so it cannot" >&2
+            echo "be named stably. Re-run with:  --disk ${dev#/dev/}" >&2
+            return 1
+        fi
+        echo "==> one disk: $dev  $size  $model" >&2
+        case "$vcode" in
+            windows) echo "    NOTE: it carries Windows or an EFI System Partition. There is" >&2
+                     echo "          nowhere else to install, so THAT IS WHAT GETS ERASED." >&2 ;;
+            data)    echo "    NOTE: it has partitions on it. They will be erased." >&2 ;;
+        esac
+        printf '%s' "$serial"
+        return 0
+    fi
+
+    # More than one disk: a person decides.
+    {
+        echo
+        echo "$n disks. Nothing will be selected automatically - pick one."
+        echo
+        printf '  %-14s %-10s %-24s %-20s %s\n' DEVICE SIZE SERIAL MODEL VERDICT
+        printf '%s\n' "$rows" | while IFS=$'\t' read -r _ dev serial _ size model vcode; do
+            printf '  %-14s %-10s %-24s %-20s %s\n' \
+                   "$dev" "$size" "${serial:-(none)}" "${model:0:20}" "$vcode"
+        done
+        echo
+        echo "  empty   = nothing on it            data    = has partitions, will be lost"
+        echo "  windows = Windows or an ESP        inuse   = the running system booted from it"
+        echo
+        echo "Full report:  sudo cat $SURVEY_DIR/$(basename "$report")"
+    } >&2
+    return 2
+}
+
 onboard_main() {
     local payload="$1" product="$2" ui_port="$3"; shift 3
     local self; self="$(basename "${BASH_SOURCE[1]:-onboard}")"
 
     if [ $# -eq 0 ]; then
-        echo "usage: $self <name> [--mac <MAC>|--any-mac|--two-pass] [--keep-armed] [new-node.py flags...]" >&2
-        echo "  $self node06                              # one power-on, MAC caught from DHCP (default)" >&2
-        echo "  $self node06 --mac 84:47:09:70:9c:11      # one power-on, no race at all" >&2
+        echo "usage: $self <name> [--no-survey|--mac <MAC>|--any-mac|--two-pass] [--keep-armed] [new-node.py flags...]" >&2
+        echo "  $self node06                              # SURVEY first, then install (default)" >&2
+        echo "  $self node06 --disk-serial S3Z9NB0M1234   # survey, but the disk is already decided" >&2
+        echo "  $self node06 --no-survey                  # straight to the installer, MAC from DHCP" >&2
+        echo "  $self node06 --mac 84:47:09:70:9c:11      # straight to the installer, no race at all" >&2
         echo "  $self node06 --any-mac                    # wildcard, auto-narrowed - rarely needed" >&2
         echo "  $self node06 --two-pass                   # old flow: second manual reboot" >&2
-        echo "  $self node06 --mac <MAC> --chain          # release a machine held by survey-node.sh" >&2
         return 1
     fi
 
     local name="$1"; shift
-    local mode=watch mac="" keep_armed=0 chain=0
+    local mode=survey mac="" keep_armed=0 chain=0 want_serial=""
     local passthru=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -126,6 +251,12 @@ onboard_main() {
             --any-mac)    mode=any;      shift ;;
             --two-pass)   mode=twopass;  shift ;;
             --watch)      mode=watch;    shift ;;
+            --no-survey)  mode=watch;    shift ;;
+            --survey)     mode=survey;   shift ;;
+            # Noted as well as forwarded: with several disks the survey needs
+            # to know a choice has already been made, and it is checked
+            # against what the machine actually reports before being used.
+            --disk-serial) want_serial="${2:?--disk-serial needs a serial}"; passthru+=("$1" "$2"); shift 2 ;;
             --keep-armed) keep_armed=1;  shift ;;
             *)            passthru+=("$1"); shift ;;
         esac
@@ -193,6 +324,77 @@ disk, installing unattended. (Drop --two-pass next time to skip this step.)
 MSG
         _trailer
         return 0
+    fi
+
+    # ------------------------------------------------ survey, then install --
+    # The default. Look inside the machine, confirm which disk may be erased,
+    # and release the machine straight into the installer without anyone going
+    # back to it. One power-on, start to finish.
+    if [ "$mode" = survey ]; then
+        local report serial rc
+        if ! report="$(_survey_run)"; then
+            echo "Timed out: nothing reported." >&2
+            echo >&2
+            echo "  - Was the boot entry 'PXE IPv4' and not 'HTTP IPv4'? The latter is" >&2
+            echo "    UEFI's own HTTP Boot, a vendor class this server has no rules for," >&2
+            echo "    so it gets no reply and retries silently with nothing in any log." >&2
+            echo "  - Watch the handshake live with:  sudo pxectl log" >&2
+            echo "  - The target needs ~2 GB RAM to hold SystemRescue." >&2
+            _disarm
+            return 1
+        fi
+
+        mac="${report%.txt}"
+        echo
+        echo "==> '$name' reported in - MAC $mac"
+
+        if [ -n "$want_serial" ]; then
+            # Trust, but check: a serial typed from the wrong report, or from
+            # the wrong machine entirely, would erase a disk nobody looked at.
+            if ! _survey_field "$SURVEY_DIR/$report" DISK | grep -qF "$want_serial"; then
+                echo >&2
+                echo "--disk-serial $want_serial is not one of the disks this machine" >&2
+                echo "just reported. Refusing to install to a disk the survey never saw." >&2
+                echo >&2
+                _survey_choose_disk "$SURVEY_DIR/$report" >/dev/null || true
+                _disarm
+                return 1
+            fi
+            serial="$want_serial"
+            echo "==> using the disk you named: $serial (confirmed present)"
+        else
+            serial="$(_survey_choose_disk "$SURVEY_DIR/$report")"
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+                # Several disks. The machine is still holding, so this costs
+                # nothing but a decision - re-run naming one and it is released.
+                cat >&2 <<MSG
+
+The machine is STILL HOLDING and nothing has been written to it. Re-run with
+the serial you want, and it will be released straight into the installer:
+
+    $self $name --disk-serial <SERIAL>
+
+It holds for 90 min from when it reported, then reboots to its normal boot
+device on its own.
+MSG
+                # Deliberately NOT disarmed: the held machine polls this server
+                # over HTTP, and taking it away would strand it.
+                return 1
+            fi
+            [ "$rc" -ne 0 ] && { _disarm; return 1; }
+        fi
+
+        echo "==> writing the answer file for $name, scoped to $mac"
+        # The serial is already in passthru when the caller named it; only add
+        # it when the survey chose it, or new-node.py would see it twice.
+        if [ -z "$want_serial" ]; then
+            passthru+=(--disk-serial "$serial")
+        fi
+        _serve "$mac"
+        # From here the machine is held and waiting, so releasing it is the
+        # same job --chain does after an explicit survey-node.sh run.
+        chain=1
     fi
 
     # ------------------------------------------- answer known before boot --
