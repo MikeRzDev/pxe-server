@@ -212,6 +212,20 @@ for t in "$HERE"/tools/*; do
     render "$t" "$PXE_ROOT/http/tools/$(basename "$t")" 0644 "$PXE_USER:$PXE_USER"
 done
 
+# Autorun scripts fetched by a netbooted SystemRescue via ar_source=. One
+# subdirectory per payload that needs one; boot-survey.ipxe points at
+# autorun/survey, and SystemRescue appends the literal filename "autorun".
+step "autorun scripts -> $PXE_ROOT/http/autorun"
+for dir in "$HERE"/autorun/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_ROOT/http/autorun/$name"
+    for a in "$dir"*; do
+        [ -f "$a" ] || continue
+        render "$a" "$PXE_ROOT/http/autorun/$name/$(basename "$a")" 0644 "$PXE_USER:$PXE_USER"
+    done
+done
+
 step "nginx site"
 RUN ln -sfn /etc/nginx/sites-available/pxe /etc/nginx/sites-enabled/pxe
 # The pxe site is `listen 80 default_server`; Debian's stock site claims that too.

@@ -1,0 +1,71 @@
+#!/bin/bash
+# autorun - the headless half of the disk survey.
+#
+# SystemRescue's own autorun service downloads this file (from the ar_source=
+# URL on the kernel cmdline set by boot-survey.ipxe), makes it executable and
+# runs it as root once the network is up. Nothing here needs a keyboard or a
+# monitor: power the machine on, walk away, and the report appears on the PXE
+# server.
+#
+#   power on  ->  PXE  ->  SystemRescue  ->  this  ->  report POSTed  ->  power off
+#
+# It touches no disk. SystemRescue runs entirely from RAM and the survey only
+# reads block-device metadata.
+#
+# Do not run this by hand - it powers the machine off when it finishes. Run
+# tools/disk-survey.sh directly instead.
+
+SERVER="@@SERVER_IP@@"
+SURVEY_URL="http://${SERVER}/tools/disk-survey.sh"
+POST_URL="http://${SERVER}:8080/survey"
+LOG=/var/autorun/survey.log
+
+exec > >(tee -a "$LOG") 2>&1
+
+echo ""
+echo "======================================================================"
+echo " HEADLESS DISK SURVEY"
+echo " reporting to $POST_URL"
+echo "======================================================================"
+echo ""
+
+# The autorun service orders itself After=network-online.target, but a slow
+# link or a NIC that negotiates late can still leave us here before DHCP has
+# finished. Cheap to wait, expensive to power off having reported nothing.
+for i in $(seq 1 30); do
+    if curl -sf --connect-timeout 3 -o /dev/null "http://${SERVER}/tools/"; then
+        echo "==> PXE server reachable after ${i}s"
+        break
+    fi
+    [ "$i" -eq 30 ] && echo "!! PXE server never became reachable - carrying on anyway"
+    sleep 1
+done
+
+ok=0
+if curl -fsS --retry 3 --retry-delay 2 -o /tmp/disk-survey.sh "$SURVEY_URL"; then
+    echo "==> fetched disk-survey.sh"
+    # --post sends the report; the script prints it here as well, so a monitor
+    # attached to a machine that cannot reach the server still shows everything.
+    bash /tmp/disk-survey.sh --post "$POST_URL" && ok=1
+else
+    echo "!! could not fetch $SURVEY_URL"
+    echo "   falling back to a bare lsblk so this boot is not wasted:"
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MODEL,SERIAL,MOUNTPOINT
+fi
+
+echo ""
+if [ "$ok" -eq 1 ]; then
+    echo "==> report delivered. Powering off in 10 seconds."
+    echo "    (Ctrl-C now if you want to keep this rescue shell.)"
+    sleep 10
+    # -f because there is nothing to shut down cleanly: the root filesystem is
+    # a ramdisk and no disk was ever mounted.
+    poweroff -f
+else
+    # Deliberately stays up. The report is on this screen and nowhere else, so
+    # powering off here would throw away the only copy and the trip it took to
+    # get it.
+    echo "!! THE REPORT WAS NOT DELIVERED TO THE SERVER."
+    echo "   Leaving this machine powered on so the output above can be read."
+    echo "   Log: $LOG"
+fi

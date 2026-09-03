@@ -111,6 +111,18 @@ report() {
     echo " kernel $(uname -r)  -  this is what the Proxmox installer will see"
     echo "======================================================================"
 
+    # The MACs, because enrolling this machine afterwards wants one and this is
+    # the moment it is known for free - no second boot to discover it.
+    local nic mac
+    for nic in /sys/class/net/*; do
+        [ -e "$nic/address" ] || continue
+        case "$(basename "$nic")" in lo) continue ;; esac
+        mac="$(cat "$nic/address" 2>/dev/null)"
+        [ "$mac" = "00:00:00:00:00:00" ] && continue
+        printf ' NIC %-10s %s%s\n' "$(basename "$nic")" "$mac" \
+               "$([ "$(cat "$nic/carrier" 2>/dev/null)" = "1" ] && echo "   (link up)")"
+    done
+
     # The disk the running system booted from is never a candidate. Under
     # SystemRescue that is the ramdisk, so this usually finds nothing - which is
     # correct, and why it is only one of several signals below.
