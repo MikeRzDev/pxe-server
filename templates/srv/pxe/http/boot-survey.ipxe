@@ -1,5 +1,5 @@
 #!ipxe
-# pxe-description: HEADLESS DISK SURVEY (SystemRescue 13.01) - reads only, then reboots
+# pxe-description: HEADLESS DISK SURVEY (SystemRescue 13.01) - reads only, holds for release
 # pxe-payload-dir: sysresccd
 
 # Boots the SystemRescue tree already unpacked for the `rescue` payload, but
@@ -12,11 +12,15 @@
 # a multi-disk box there is no way to learn what is in there without going and
 # looking. This is the looking, done remotely.
 #
-# It REBOOTS when it is done, it does not power off. A machine that powers
-# itself down needs someone to walk over and press the button - and these boards
-# cannot be woken from S5 over the network. Since PXE was chosen from the
-# firmware's ONE-TIME boot menu, the reboot lands on the normal boot device.
-# The poweroff variant is on the menu for the cases where that is wanted.
+# By default it then HOLDS, polling this server for a release file naming its
+# own MAC. Picking which of six disks to erase is a decision a person makes
+# after reading the survey, and holding is what stops that decision costing a
+# second trip to the machine: enrol it with onboard-node.sh --chain and the
+# held machine sets BootNext and reboots straight into the installer.
+#
+# It never powers itself off unless asked to. A machine that powers down needs
+# someone to walk over and press the button, and these boards cannot be woken
+# from S5 over the network.
 #
 # ar_nowait is SystemRescue's default in 13.x, but is stated anyway: if it ever
 # flips back, a headless machine would sit forever at a "press a key" prompt
@@ -32,9 +36,10 @@ set arargs ar_source=${base-url}/autorun/survey ar_nowait=1 ar_attempts=3
 :start
 menu Disk survey  --  read-only inventory, then reboot (@@SERVER_NAME@@)
 item --gap --                 This machine will NOT be modified
-item survey                   Survey disks, report to @@SERVER_IP@@, REBOOT   [default]
+item survey                   Survey, then HOLD to be released into the installer  [default]
 item survey-nomodeset         Same, nomodeset  (no/odd GPU)
 item --gap --                 Other
+item survey-reboot            Survey, then reboot straight back to the normal boot device
 item survey-off               Survey, then POWER OFF  (needs someone to press the button)
 item survey-stay              Survey, then stay at a rescue shell
 item plain                    Plain SystemRescue shell  (no autorun)
@@ -43,11 +48,15 @@ choose --timeout 10000 --default survey selected || goto survey
 goto ${selected}
 
 :survey
-set kopts ${karch} copytoram ${arargs} survey_after=reboot
+set kopts ${karch} copytoram ${arargs} survey_after=hold
 goto load
 
 :survey-nomodeset
-set kopts ${karch} copytoram nomodeset ${arargs} survey_after=reboot
+set kopts ${karch} copytoram nomodeset ${arargs} survey_after=hold
+goto load
+
+:survey-reboot
+set kopts ${karch} copytoram ${arargs} survey_after=reboot
 goto load
 
 :survey-off
@@ -69,7 +78,7 @@ echo   cmdline : ${kopts}
 echo   client  : ${net0/mac}  ${ip}
 echo
 echo No disk is written. The report goes to @@SERVER_IP@@ and the machine
-echo reboots when it is done, back onto its normal boot device.
+echo then waits to be told which disk to install to.
 echo
 kernel ${base-url}/sysresccd/boot/x86_64/vmlinuz ${kopts} || goto failed
 initrd ${base-url}/sysresccd/boot/intel_ucode.img                || goto failed

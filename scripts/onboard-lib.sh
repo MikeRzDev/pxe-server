@@ -44,6 +44,15 @@
 #                 MANUAL REBOOT. Kept because it is the most predictable thing
 #                 to fall back to when something upstream has changed.
 #
+#   --chain       The target is ALREADY UP, held in the survey shell by
+#                 survey-node.sh, waiting to be told which disk to install to.
+#                 Needs --mac (survey-node.sh prints it). Instead of waiting for
+#                 someone to power the machine on, this drops a release file the
+#                 held machine is polling for; it then sets BootNext and reboots
+#                 itself into the installer. That is what makes a multi-disk
+#                 install a SINGLE power-on: look, decide, install, without
+#                 anyone going back to the machine in between.
+#
 # In every mode THE TARGET'S DISK IS ERASED WITHOUT CONFIRMATION once its
 # answer file exists. And while a payload is armed it is the ONLY one served,
 # so anything netbooting gets that installer regardless of which product it was
@@ -52,6 +61,9 @@
 
 ONBOARD_DIR="$HOME/pxe-server/new_machine_onboarding"
 ANSWERS_DIR="${PXE_ANSWER_DIR:-/srv/pxe/answers}"
+# Release files for machines held in the survey shell. Served by nginx, so a
+# held machine can poll for its own MAC over plain HTTP. See --chain.
+GO_DIR="${PXE_GO_DIR:-/srv/pxe/http/go}"
 WAIT_SECS=900
 
 norm_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd '0-9a-f'; }
@@ -100,15 +112,17 @@ onboard_main() {
         echo "  $self node06 --mac 84:47:09:70:9c:11      # one power-on, no race at all" >&2
         echo "  $self node06 --any-mac                    # wildcard, auto-narrowed - rarely needed" >&2
         echo "  $self node06 --two-pass                   # old flow: second manual reboot" >&2
+        echo "  $self node06 --mac <MAC> --chain          # release a machine held by survey-node.sh" >&2
         return 1
     fi
 
     local name="$1"; shift
-    local mode=watch mac="" keep_armed=0
+    local mode=watch mac="" keep_armed=0 chain=0
     local passthru=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --mac)        mac="${2:?--mac needs an address}"; mode=mac; shift 2 ;;
+            --chain)      chain=1;       shift ;;
             --any-mac)    mode=any;      shift ;;
             --two-pass)   mode=twopass;  shift ;;
             --watch)      mode=watch;    shift ;;
@@ -205,6 +219,23 @@ WARN
     sudo -A -A pxectl "$payload"
     since="$(date '+%Y-%m-%d %H:%M:%S')"
 
+    # Release AFTER arming, never before: the held machine reboots within
+    # seconds of seeing this file, and it must find the installer already being
+    # served when it comes back around.
+    if [ "$chain" -eq 1 ]; then
+        local norm; norm="$(norm_mac "$mac")"
+        if [ -z "$norm" ]; then
+            echo "--chain needs --mac (survey-node.sh prints the machine's MAC)." >&2
+            _disarm
+            return 1
+        fi
+        sudo -A -A install -d -m 0755 "$GO_DIR"
+        printf 'install %s\n' "$name" | sudo -A -A tee "$GO_DIR/$norm.txt" >/dev/null
+        sudo -A -A chmod 0644 "$GO_DIR/$norm.txt"
+        echo "==> released $norm - the held machine sets BootNext and reboots"
+        echo "    into the installer within ~10s. It erases the disk named above."
+    fi
+
     # ------------------------------------------------ watch: catch the MAC --
     if [ "$mode" = watch ]; then
         cat <<MSG
@@ -268,6 +299,14 @@ MSG
             sudo -A -A mv "$ANSWERS_DIR/default.toml" "$ANSWERS_DIR/$norm.toml"
             echo "==> narrowed default.toml -> $norm.toml (the wildcard is gone)"
         fi
+    fi
+
+    # A release file that outlives its install is a loaded gun: the next time
+    # this machine is surveyed it would be let straight back into an installer
+    # without anyone deciding that. Remove it the moment it has done its job.
+    if [ "$chain" -eq 1 ]; then
+        sudo -A -A rm -f "$GO_DIR/$(norm_mac "$mac").txt"
+        echo "==> release file removed"
     fi
 
     # The installer runs from its own ramdisk now and will not come back to the

@@ -169,6 +169,10 @@ RUN install -d -o "$PXE_USER" -g www-data -m 0750 "$ANSWER_DIR"
 # Surveys are written by the answer server (www-data) and read by a human.
 # They describe hardware, not credentials, so they are not secret.
 RUN install -d -o www-data -g "$PXE_USER" -m 0775 "$SURVEY_DIR"
+# Release files for machines held in the survey shell (onboard-node.sh --chain).
+# Under the http root so a held machine can poll for its own MAC over plain
+# HTTP, exactly as it fetched everything else it is running.
+RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_ROOT/http/go"
 # nginx logs live on a tmpfs on DietPi; the drop-in recreates this at start,
 # but create it now so a manual `nginx -t` before first start also works.
 RUN install -d -o www-data -g adm -m 0755 /var/log/nginx

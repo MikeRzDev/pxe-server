@@ -30,6 +30,7 @@
 set -uo pipefail
 
 SURVEY_DIR="${PXE_SURVEY_DIR:-/srv/pxe/surveys}"
+GO_DIR="${PXE_GO_DIR:-/srv/pxe/http/go}"
 WAIT_MINS=20
 KEEP_ARMED=0
 
@@ -59,6 +60,15 @@ snapshot_existing() {
     sudo -A -A find "$SURVEY_DIR" -name '*.txt' -printf '%f %T@\n' 2>/dev/null | sort
 }
 
+# A release file left over from a previous run would let the machine about to
+# be surveyed straight back into a disk-wiping installer without anyone having
+# decided that. Starting a survey means nothing is released yet.
+STALE="$(sudo -A -A find "$GO_DIR" -name '*.txt' 2>/dev/null | wc -l)"
+if [ "${STALE:-0}" -gt 0 ]; then
+    echo "==> clearing $STALE stale release file(s) from $GO_DIR"
+    sudo -A -A find "$GO_DIR" -name '*.txt' -delete 2>/dev/null
+fi
+
 echo "==> arming the read-only survey payload"
 sudo -A -A pxectl survey || exit 1
 
@@ -74,7 +84,7 @@ Nothing else to do. It will:
     netboot SystemRescue into RAM   (~1-2 min, nothing written to disk)
     inventory every disk it can see
     POST the report back here
-    REBOOT, back onto its normal boot device
+    HOLD, waiting to be told which disk to install to
 
 Waiting up to $WAIT_MINS min...
 
@@ -122,10 +132,14 @@ cat <<MSG
 Pick the disk from the SUMMARY above - the one you are certain about -
 and enrol the machine with its SERIAL, not its device name:
 
-    ~/scripts/onboard-node.sh <name> --mac $MAC --disk-serial <SERIAL>
+    ~/scripts/onboard-node.sh <name> --mac $MAC --disk-serial <SERIAL> --chain
 
---mac is free here: this machine has already told us what it is, so the
-installer's answer file is in place before it is even switched on.
+The machine is STILL UP, holding in the rescue shell and polling to be
+released. --chain drops that release: it then sets BootNext, reboots straight
+into the installer and installs unattended. Nobody goes back to the machine.
+
+Drop --chain if it gave up holding and rebooted - then it needs one more
+power-on instead.
 
 THAT command erases the named disk with no confirmation. This one did not
 write anything.
@@ -134,4 +148,15 @@ write anything.
   survey another box  : ~/scripts/survey-node.sh
 MSG
 
-disarm
+# NOT disarmed. The machine is still up, polling this server over HTTP for
+# its release - taking nginx away now would strand it with no way to be told
+# anything. The survey payload is read-only, so leaving it armed cannot hurt
+# anything else that netboots meanwhile; onboard-node.sh --chain swaps it for
+# the installer, and disarms once the answer has been collected.
+if [ "$KEEP_ARMED" -eq 1 ]; then
+    echo "==> leaving PXE armed (--keep-armed)"
+else
+    echo "==> leaving the read-only survey payload armed so the held machine can"
+    echo "    poll for its release. ~/scripts/pxe-stop.sh if you change your mind"
+    echo "    (that also strands it, and it reboots on its own after 90 min)."
+fi

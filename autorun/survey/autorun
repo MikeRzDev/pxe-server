@@ -20,9 +20,27 @@
 # else was there - rather than netbooting into this again.
 #
 # Override from the kernel cmdline (see boot-survey.ipxe):
-#   survey_after=reboot     default
+#   survey_after=hold       default - see below
+#   survey_after=reboot     report, then straight back to the normal boot device
 #   survey_after=poweroff   only where someone can press the button again
-#   survey_after=stay       leave the rescue shell up
+#   survey_after=stay       leave the rescue shell up, do nothing else
+#
+# HOLD, and why it is the default
+# -------------------------------
+# Choosing which of six disks to erase is a decision a person has to make, and
+# they cannot make it until the survey has been read. That would normally cost a
+# second trip to the machine: survey, decide, come back, power it on again.
+#
+# So instead of rebooting, this HOLDS - it sits here polling the PXE server for
+# a release file naming its own MAC. The moment the operator has picked a disk
+# and enrolled the machine (onboard-node.sh --chain), that file appears, and
+# this sets the firmware to netboot ONCE more and reboots into the installer.
+#
+# One power-on, from a cold Windows box to an installed Proxmox node, with a
+# human confirming the target disk in the middle.
+#
+# If nobody releases it before the timeout it reboots back to the normal boot
+# device, so a forgotten machine is never left stranded in a rescue shell.
 #
 # Do not run this by hand - it reboots the machine when it finishes. Run
 # tools/disk-survey.sh directly instead.
@@ -35,9 +53,23 @@ LOG=/var/autorun/survey.log
 # What to do when the report has been delivered. Rebooting is the safe default:
 # see the header. Read straight from the cmdline rather than through
 # SystemRescue's config layer, which only maps keys it already knows about.
-AFTER=reboot
+AFTER=hold
+HOLD_MINS=90
 for opt in $(cat /proc/cmdline 2>/dev/null); do
-    case "$opt" in survey_after=*) AFTER="${opt#survey_after=}" ;; esac
+    case "$opt" in
+        survey_after=*) AFTER="${opt#survey_after=}" ;;
+        survey_hold_mins=*) HOLD_MINS="${opt#survey_hold_mins=}" ;;
+    esac
+done
+
+# This machine's own MAC, normalised the way the server names things after it.
+MYMAC=""
+for _n in /sys/class/net/*; do
+    [ -e "$_n/address" ] || continue
+    case "$(basename "$_n")" in lo) continue ;; esac
+    [ "$(cat "$_n/carrier" 2>/dev/null)" = "1" ] || continue
+    MYMAC="$(tr -d ':' < "$_n/address")"
+    break
 done
 
 exec > >(tee -a "$LOG") 2>&1
@@ -73,9 +105,128 @@ else
     lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MODEL,SERIAL,MOUNTPOINT
 fi
 
+
+# ---------------------------------------------------------------------------
+# Chaining into the installer.
+#
+# Deliberately NOT kexec as the first choice. The Proxmox fleet initrd is 2 GB
+# and the installer then wants a 16 GB ramdisk; staging that alongside a
+# copytoram SystemRescue is a lot of memory to need all at once, and a machine
+# that runs out here dies with its disks untouched but its trip wasted.
+#
+# Setting BootNext instead costs nothing and re-uses the exact path that is
+# already known to work on this LAN: firmware -> PXE -> iPXE -> armed payload.
+# BootNext is consumed by the firmware on the next boot and does not change the
+# permanent boot order, so this is a one-shot netboot and nothing else.
+# ---------------------------------------------------------------------------
+find_pxe_boot_entry() {
+    command -v efibootmgr >/dev/null || return 1
+    [ -d /sys/firmware/efi ] || return 1
+    # A UEFI network-boot entry names both the protocol and the IP version, eg
+    #   Boot0003* UEFI: PXE IPv4 Intel(R) Ethernet Connection ...
+    # Match on both so this never picks the HTTP Boot entry, which is a
+    # different DHCP vendor class that this PXE server does not answer at all.
+    efibootmgr 2>/dev/null \
+        | grep -iE '^Boot[0-9A-Fa-f]{4}' \
+        | grep -i 'pxe' \
+        | grep -iE 'ipv4|ip4' \
+        | head -1 \
+        | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p'
+}
+
+chain_via_bootnext() {
+    local entry
+    entry="$(find_pxe_boot_entry)" || return 1
+    [ -n "$entry" ] || return 1
+    echo "==> UEFI PXE IPv4 boot entry: Boot$entry"
+    efibootmgr --bootnext "$entry" >/dev/null 2>&1 || return 1
+    echo "==> BootNext set. This is one-shot - the permanent boot order is unchanged."
+    return 0
+}
+
+chain_via_kexec() {
+    local mem_kb
+    command -v kexec >/dev/null || { echo "!! kexec not available"; return 1; }
+    mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+    if [ "${mem_kb:-0}" -lt 8000000 ]; then
+        echo "!! only $((mem_kb / 1024)) MB RAM - too little to stage a 2 GB initrd"
+        echo "   on top of this rescue system AND give the installer its ramdisk."
+        return 1
+    fi
+    echo "==> staging the installer for kexec (2 GB, takes a minute)"
+    curl -fsS -o /tmp/linux26 "http://${SERVER}/pve-fleet/linux26" || return 1
+    curl -fsS -o /tmp/initrd  "http://${SERVER}/pve-fleet/initrd"  || return 1
+    # The same cmdline boot-proxmox-fleet.ipxe uses. ramdisk_size is mandatory:
+    # the whole ISO is unpacked into that ramdisk and a smaller one fails late.
+    kexec -l /tmp/linux26 --initrd=/tmp/initrd \
+          --command-line="ro ramdisk_size=16777216 rw quiet splash=silent proxmox-start-auto-installer" \
+        || return 1
+    echo "==> kexec loaded. Jumping into the installer."
+    kexec -e
+    return 0
+}
+
+# Poll the PXE server for a file naming this machine's MAC. It appears when the
+# operator has read the survey, chosen a disk and enrolled this machine.
+wait_for_release() {
+    local url="http://${SERVER}/go/${MYMAC}.txt"
+    local deadline=$((SECONDS + HOLD_MINS * 60)) body
+    echo "==> HOLDING. Waiting up to ${HOLD_MINS} min to be released."
+    echo "    watching : $url"
+    echo ""
+    echo "    On the PXE server, once you have picked a disk from the report:"
+    echo ""
+    echo "        ~/scripts/onboard-node.sh <name> --mac ${MYMAC} \\"
+    echo "            --disk-serial <SERIAL> --chain"
+    echo ""
+    echo "    Nothing on this machine has been written to, and nothing will be"
+    echo "    until that command names a disk."
+    echo ""
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if body="$(curl -fsS --connect-timeout 5 "$url" 2>/dev/null)"; then
+            echo "==> RELEASED: $body"
+            return 0
+        fi
+        sleep 10
+    done
+    return 1
+}
+
 echo ""
 if [ "$ok" -eq 1 ]; then
     case "$AFTER" in
+        hold)
+            if [ -z "$MYMAC" ]; then
+                echo "!! no NIC with a link - cannot be released by MAC. Rebooting."
+                sleep 10
+                reboot -f
+            elif wait_for_release; then
+                echo ""
+                echo "======================================================================"
+                echo " CHAINING INTO THE PROXMOX INSTALLER"
+                echo " The disk named in this machine's answer file is about to be ERASED."
+                echo "======================================================================"
+                echo ""
+                if chain_via_bootnext; then
+                    echo "==> rebooting into the installer in 10 seconds."
+                    sleep 10
+                    reboot -f
+                else
+                    echo "!! no UEFI PXE IPv4 boot entry found - falling back to kexec."
+                    if ! chain_via_kexec; then
+                        echo ""
+                        echo "!! COULD NOT CHAIN. The machine is being left up and untouched."
+                        echo "   The answer file is served and PXE is armed, so a manual"
+                        echo "   reboot into 'PXE IPv4' finishes the job."
+                    fi
+                fi
+            else
+                echo "==> not released within ${HOLD_MINS} min. Rebooting to the normal"
+                echo "    boot device so this machine is not left stranded here."
+                sleep 10
+                reboot -f
+            fi
+            ;;
         stay)
             echo "==> report delivered. survey_after=stay - leaving the shell up."
             ;;
