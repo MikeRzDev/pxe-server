@@ -65,7 +65,10 @@ ANSWERS_DIR="${PXE_ANSWER_DIR:-/srv/pxe/answers}"
 # held machine can poll for its own MAC over plain HTTP. See --chain.
 SURVEY_DIR="${PXE_SURVEY_DIR:-/srv/pxe/surveys}"
 GO_DIR="${PXE_GO_DIR:-/srv/pxe/http/go}"
-WAIT_SECS=900
+# Overridable, because the survey phase waits for a person to walk over and
+# power a machine on, which is a different timescale from waiting for an
+# already-booting machine to reach the installer.
+WAIT_SECS="${PXE_WAIT_SECS:-900}"
 
 norm_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd '0-9a-f'; }
 
@@ -116,7 +119,7 @@ wait_for_log() {
 # this one. Name plus mtime, because a re-survey of the same machine overwrites
 # its own file rather than adding another.
 _survey_snapshot() {
-    sudo -A -A find "$SURVEY_DIR" -name '*.txt' -printf '%f %T@\n' 2>/dev/null | sort
+    sudo -A -A find "$SURVEY_DIR" -name '*.txt' -printf '%f %T@\n' 2>/dev/null | sort || true
 }
 
 # Arm the read-only survey payload and wait for a machine to report. Echoes the
@@ -127,7 +130,7 @@ _survey_run() {
 
     # A release file outliving its install would let the machine about to be
     # surveyed straight back into an installer with nobody deciding that.
-    sudo -A -A find "$GO_DIR" -name '*.txt' -delete 2>/dev/null
+    sudo -A -A find "$GO_DIR" -name '*.txt' -delete 2>/dev/null || true
 
     echo "==> arming the read-only survey payload" >&2
     sudo -A -A pxectl survey >/dev/null || return 1
@@ -153,7 +156,7 @@ MSG
         if [ "$after" != "$before" ]; then
             new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") \
                    | awk '{print $1}' | tail -1)"
-            [ -n "$new" ] && { printf '%s' "$new"; return 0; }
+            if [ -n "$new" ]; then printf '%s' "$new"; return 0; fi
         fi
         # Tight, because the machine starts holding the moment it has reported
         # and the sooner it is answered the shorter it sits there.
@@ -167,7 +170,7 @@ MSG
 # waiting to be told which disk to use - and re-surveying it would hang forever,
 # because a held machine never netboots again on its own.
 _survey_recent() {
-    sudo -A -A find "$SURVEY_DIR" -name '*.txt' -mmin -90 -printf '%f\n' 2>/dev/null | sort
+    sudo -A -A find "$SURVEY_DIR" -name '*.txt' -mmin -90 -printf '%f\n' 2>/dev/null | sort || true
 }
 
 # Pull the machine-readable tail out of a report.
@@ -188,7 +191,7 @@ _survey_field() {  # <report-path> <MAC|DISK>
 _survey_choose_disk() {   # <report-path>
     local report="$1" rows n
     rows="$(_survey_field "$report" DISK)"
-    n="$(printf '%s\n' "$rows" | grep -c . )"
+    n="$(printf '%s\n' "$rows" | grep -c . || true)"
 
     if [ "${n:-0}" -eq 0 ]; then
         echo "The survey found no disks at all. On an NVMe or hardware-RAID box" >&2
@@ -351,10 +354,10 @@ MSG
         # already holding and will never netboot on its own, so waiting for a
         # fresh report would hang until the hold times out.
         recent="$(_survey_recent)"
-        nrecent="$(printf '%s\n' "$recent" | grep -c .)"
+        nrecent="$(printf '%s\n' "$recent" | grep -c . || true)"
         if [ "$resurvey" -eq 0 ] && [ "${nrecent:-0}" -ge 1 ]; then
             if [ -n "$mac" ]; then
-                report="$(printf '%s\n' "$recent" | grep -F "$(norm_mac "$mac").txt" | head -1)"
+                report="$(printf '%s\n' "$recent" | grep -F "$(norm_mac "$mac").txt" | head -1 || true)"
             elif [ "$nrecent" -eq 1 ]; then
                 report="$recent"
             else
@@ -400,8 +403,8 @@ MSG
             serial="$want_serial"
             echo "==> using the disk you named: $serial (confirmed present)"
         else
-            serial="$(_survey_choose_disk "$SURVEY_DIR/$report")"
-            rc=$?
+            rc=0
+            serial="$(_survey_choose_disk "$SURVEY_DIR/$report")" || rc=$?
             if [ "$rc" -eq 2 ]; then
                 # Several disks. The machine is still holding, so this costs
                 # nothing but a decision - re-run naming one and it is released.
@@ -419,7 +422,7 @@ MSG
                 # over HTTP, and taking it away would strand it.
                 return 1
             fi
-            [ "$rc" -ne 0 ] && { _disarm; return 1; }
+            if [ "$rc" -ne 0 ]; then _disarm; return 1; fi
         fi
 
         echo "==> writing the answer file for $name, scoped to $mac"
