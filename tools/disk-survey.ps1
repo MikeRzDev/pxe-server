@@ -92,12 +92,13 @@ $report = @()
 
 foreach ($disk in (Get-Disk | Sort-Object Number)) {
 
-    $serial = ($disk.SerialNumber   | ForEach-Object { $_ }) -as [string]
-    if ($serial) { $serial = $serial.Trim() }
-    $model  = ($disk.FriendlyName   | ForEach-Object { $_ }) -as [string]
-    if ($model)  { $model  = $model.Trim() }
+    # Some controllers pad these with spaces; an untrimmed serial pasted into
+    # --disk-serial matches nothing and the install aborts having done nothing,
+    # which is a confusing way to spend a reboot.
+    $serial = ([string]$disk.SerialNumber).Trim()
+    $model  = ([string]$disk.FriendlyName).Trim()
 
-    $isSystem = ($sysDiskNum -ne $null -and $disk.Number -eq $sysDiskNum)
+    $isSystem = ($null -ne $sysDiskNum -and $disk.Number -eq $sysDiskNum)
     $flags    = @()
     if ($isSystem)      { $flags += "HOLDS WINDOWS ($sysDrive)" }
     if ($disk.IsBoot)   { $flags += 'IsBoot' }
