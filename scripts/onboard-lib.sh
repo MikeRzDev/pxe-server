@@ -162,6 +162,14 @@ MSG
     return 1
 }
 
+# A report from a machine that is probably still holding. The survey payload
+# holds for 90 min, so anything younger than that is very likely the machine
+# waiting to be told which disk to use - and re-surveying it would hang forever,
+# because a held machine never netboots again on its own.
+_survey_recent() {
+    sudo -A -A find "$SURVEY_DIR" -name '*.txt' -mmin -90 -printf '%f\n' 2>/dev/null | sort
+}
+
 # Pull the machine-readable tail out of a report.
 _survey_field() {  # <report-path> <MAC|DISK>
     sudo -A -A sed -n '/^### SURVEY-DATA v1$/,/^### END SURVEY-DATA$/p' "$1" \
@@ -191,7 +199,12 @@ _survey_choose_disk() {   # <report-path>
 
     if [ "$n" -eq 1 ]; then
         local dev serial size model vcode
-        IFS=$'\t' read -r _ dev serial _ size model vcode <<<"$rows"
+        # awk, not `read`: with IFS=tab a run of tabs is still collapsed (tab is
+        # IFS whitespace), so one empty column silently shifts every column
+        # after it - which here would hand back a disk SIZE as if it were a
+        # serial. The survey writes "-" rather than nothing for the same reason.
+        _f() { printf '%s' "$rows" | awk -F'\t' -v n="$1" 'NR==1{v=$n; if(v=="-")v=""; print v}'; }
+        dev="$(_f 2)"; serial="$(_f 3)"; size="$(_f 5)"; model="$(_f 6)"; vcode="$(_f 7)"
         if [ -z "$serial" ]; then
             echo "The machine's one disk ($dev, $size) reports no serial, so it cannot" >&2
             echo "be named stably. Re-run with:  --disk ${dev#/dev/}" >&2
@@ -213,10 +226,10 @@ _survey_choose_disk() {   # <report-path>
         echo "$n disks. Nothing will be selected automatically - pick one."
         echo
         printf '  %-14s %-10s %-24s %-20s %s\n' DEVICE SIZE SERIAL MODEL VERDICT
-        printf '%s\n' "$rows" | while IFS=$'\t' read -r _ dev serial _ size model vcode; do
-            printf '  %-14s %-10s %-24s %-20s %s\n' \
-                   "$dev" "$size" "${serial:-(none)}" "${model:0:20}" "$vcode"
-        done
+        printf '%s\n' "$rows" | awk -F'\t' 'NF>=7 {
+            s = ($3 == "-" ? "(none)" : $3)
+            printf "  %-14s %-10s %-24s %-20s %s\n", $2, $5, s, substr($6, 1, 20), $7
+        }' 
         echo
         echo "  empty   = nothing on it            data    = has partitions, will be lost"
         echo "  windows = Windows or an ESP        inuse   = the running system booted from it"
@@ -242,7 +255,7 @@ onboard_main() {
     fi
 
     local name="$1"; shift
-    local mode=survey mac="" keep_armed=0 chain=0 want_serial=""
+    local mode=survey mac="" keep_armed=0 chain=0 want_serial="" resurvey=0 report=""
     local passthru=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -253,6 +266,7 @@ onboard_main() {
             --watch)      mode=watch;    shift ;;
             --no-survey)  mode=watch;    shift ;;
             --survey)     mode=survey;   shift ;;
+            --resurvey)   mode=survey; resurvey=1; shift ;;
             # Noted as well as forwarded: with several disks the survey needs
             # to know a choice has already been made, and it is checked
             # against what the machine actually reports before being used.
@@ -331,8 +345,31 @@ MSG
     # and release the machine straight into the installer without anyone going
     # back to it. One power-on, start to finish.
     if [ "$mode" = survey ]; then
-        local report serial rc
-        if ! report="$(_survey_run)"; then
+        local serial rc recent nrecent
+
+        # Re-running after "pick a disk" must NOT survey again: that machine is
+        # already holding and will never netboot on its own, so waiting for a
+        # fresh report would hang until the hold times out.
+        recent="$(_survey_recent)"
+        nrecent="$(printf '%s\n' "$recent" | grep -c .)"
+        if [ "$resurvey" -eq 0 ] && [ "${nrecent:-0}" -ge 1 ]; then
+            if [ -n "$mac" ]; then
+                report="$(printf '%s\n' "$recent" | grep -F "$(norm_mac "$mac").txt" | head -1)"
+            elif [ "$nrecent" -eq 1 ]; then
+                report="$recent"
+            else
+                echo "Several machines reported in the last 90 min:" >&2
+                printf '  %s\n' $recent >&2
+                echo "Name one with --mac <MAC>, or --resurvey to take a fresh look." >&2
+                return 1
+            fi
+        fi
+
+        if [ -n "$report" ]; then
+            echo "==> reusing the report this machine already sent" \
+                 "($(( ($(date +%s) - $(sudo -A -A stat -c %Y "$SURVEY_DIR/$report")) / 60 )) min ago)"
+            echo "    It is still holding, so it is not asked to boot again."
+        elif ! report="$(_survey_run)"; then
             echo "Timed out: nothing reported." >&2
             echo >&2
             echo "  - Was the boot entry 'PXE IPv4' and not 'HTTP IPv4'? The latter is" >&2

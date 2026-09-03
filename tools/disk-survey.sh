@@ -243,7 +243,7 @@ report() {
         # a single-disk machine (nothing to decide) from one where a human
         # must choose, without parsing English.
         data="$data$(printf 'DISK\t%s\t%s\t%s\t%s\t%s\t%s' \
-            "$dev" "${serial:-}" "$size_b" "$(human "$size_b")" \
+            "$dev" "${serial:--}" "$size_b" "$(human "$size_b")" \
             "${model:-unknown}" "$vcode")
 "
 
