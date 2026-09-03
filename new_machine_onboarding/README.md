@@ -351,21 +351,33 @@ OS, that is the difference between wiping a spare disk and wiping everything.
 
 **Select by serial instead.** It is the same on every boot.
 
-**1. Look at what is in the machine.** From a SystemRescue netboot
-(`sudo pxectl rescue`, then at the target's shell):
+**1. Look at what is in the machine — headlessly.** On the PXE server:
 
 ```bash
-curl -s http://<pxe-server>/tools/disk-survey.sh | bash -s -- --post
+~/scripts/survey-node.sh
 ```
 
-It prints every disk with its size, model, serial, partition labels, used and
-free space, and flags any disk carrying NTFS or an EFI System Partition as one
-to keep rather than install to. `--post` also files the report on the PXE
-server, in `/srv/pxe/surveys/<mac>.txt`, so it can be read from there instead of
-off the target's monitor.
+Then power the target on via its UEFI **PXE IPv4** entry and walk away. It
+netboots SystemRescue into RAM, inventories every disk, POSTs the report back
+and powers itself off; `survey-node.sh` prints the report and disarms PXE.
+**Nothing is written to the target** — SystemRescue runs entirely from RAM and
+the survey only reads block-device metadata. Reports are kept at
+`/srv/pxe/surveys/<mac>.txt`.
 
-If the machine currently runs Windows there is no need to reboot it at all —
-run `tools/disk-survey.ps1` in an elevated PowerShell for the same report.
+The report gives every disk's size, model, serial, partition labels, used and
+free space, and flags any disk carrying NTFS or an EFI System Partition as one
+to keep rather than install to. It leads with the machine's MACs, so the
+enrolment that follows can pass `--mac` and skip the discovery race entirely.
+
+Two manual variants, when a headless boot is not what you want:
+
+```bash
+# target still running Windows, must not be rebooted - elevated PowerShell:
+#     tools/disk-survey.ps1
+
+# any Linux shell, including a plain `pxectl rescue` boot:
+curl -s http://<pxe-server>/tools/disk-survey.sh | bash -s -- --post
+```
 
 **2. Enrol with the serial the survey printed:**
 
