@@ -65,6 +65,9 @@ SERVER_NAME="${SERVER_NAME:-$(hostname -s 2>/dev/null || echo pxe)}"
 PXE_USER="${PXE_USER:-${SUDO_USER:-$(id -un)}}"
 PXE_ROOT="${PXE_ROOT:-/srv/pxe}"
 ANSWER_DIR="${ANSWER_DIR:-$PXE_ROOT/answers}"
+# Disk inventories POSTed by tools/disk-survey.sh. Kept apart from ANSWER_DIR
+# because the answer server may only ever WRITE here and only ever READ there.
+SURVEY_DIR="${SURVEY_DIR:-$PXE_ROOT/surveys}"
 ANSWER_PORT="${ANSWER_PORT:-8080}"
 
 for v in IFACE SERVER_IP LAN_CIDR LAN_NET; do
@@ -88,6 +91,7 @@ PXE server install
   server name : $SERVER_NAME
   payload root: $PXE_ROOT
   answers     : $ANSWER_DIR  (served on :$ANSWER_PORT for fleet mode)
+  surveys     : $SURVEY_DIR  (disk inventories POSTed by disk-survey.sh)
   wrappers to : $PXE_HOME/scripts   (user $PXE_USER)
   mode        : $([ "$DRY_RUN" -eq 1 ] && echo "DRY RUN - nothing will change" || echo "applying")
 
@@ -119,6 +123,7 @@ render() {
         -e "s|@@SERVER_NAME@@|$SERVER_NAME|g" \
         -e "s|@@PXE_HOME@@|$PXE_HOME|g" \
         -e "s|@@ANSWER_DIR@@|$ANSWER_DIR|g" \
+        -e "s|@@SURVEY_DIR@@|$SURVEY_DIR|g" \
         -e "s|@@ANSWER_PORT@@|$ANSWER_PORT|g" \
         "$src" > "$tmp"
     if grep -q '@@[A-Z_]*@@' "$tmp"; then
@@ -161,6 +166,9 @@ done
 # Answer files hold a root password hash and are read by the answer server,
 # which runs as www-data. Not world-readable.
 RUN install -d -o "$PXE_USER" -g www-data -m 0750 "$ANSWER_DIR"
+# Surveys are written by the answer server (www-data) and read by a human.
+# They describe hardware, not credentials, so they are not secret.
+RUN install -d -o www-data -g "$PXE_USER" -m 0775 "$SURVEY_DIR"
 # nginx logs live on a tmpfs on DietPi; the drop-in recreates this at start,
 # but create it now so a manual `nginx -t` before first start also works.
 RUN install -d -o www-data -g adm -m 0755 /var/log/nginx
@@ -192,6 +200,16 @@ step "payload boot scripts"
 for b in "$HERE"/templates/srv/pxe/http/boot-*.ipxe; do
     [ -e "$b" ] || continue
     render "$b" "$PXE_ROOT/http/$(basename "$b")" 0644 "$PXE_USER:$PXE_USER"
+done
+
+# Small helper scripts the TARGET machine fetches over HTTP while it is
+# netbooted - disk-survey.sh from a SystemRescue shell, most of all. They are
+# rendered like everything else so @@SERVER_IP@@ in their usage text is real.
+step "tools -> $PXE_ROOT/http/tools"
+RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_ROOT/http/tools"
+for t in "$HERE"/tools/*; do
+    [ -e "$t" ] || continue
+    render "$t" "$PXE_ROOT/http/tools/$(basename "$t")" 0644 "$PXE_USER:$PXE_USER"
 done
 
 step "nginx site"

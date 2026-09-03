@@ -9,8 +9,11 @@ Type=simple
 ExecStart=/usr/local/sbin/pxe-answer-server
 Restart=on-failure
 RestartSec=2
-# Read-only view of everything except the answer directory it serves.
+# Read-only view of everything except the answer directory it serves. The one
+# exception is the survey directory: POST /survey writes disk inventories there
+# so a multi-disk machine can be inspected before it is installed.
 ProtectSystem=strict
+ReadWritePaths=@@SURVEY_DIR@@
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes

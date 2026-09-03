@@ -92,6 +92,9 @@ the workers running — see the last section for why.
 | `templates/srv/pxe/http/boot-EXAMPLE.ipxe` | starting point for a new image, with cmdline recipes |
 | `templates/usr/local/sbin/pxectl` | the control script |
 | `scripts/` | the `~/scripts` wrappers installed for the operator |
+| `tools/disk-survey.sh` | run on a TARGET (SystemRescue or any Linux): every disk with serial, labels, free space, and a verdict on which are safe to wipe |
+| `tools/disk-survey.ps1` | the same report from an elevated PowerShell, for a target still running Windows |
+| `tools/add-windows-boot-entry.sh` | run on a node AFTER install: adds a Windows entry to its GRUB menu, without os-prober |
 
 Payloads are **not** in here — a 2 GB initrd and a 1.7 GB ISO do not belong in
 version control. `payloads/` rebuilds them from upstream instead.
@@ -108,6 +111,9 @@ any survive rendering:
 | `@@LAN_NET@@` | from CIDR | dnsmasq `dhcp-range=…,proxy` |
 | `@@IFACE@@` | detected | dnsmasq `interface=` |
 | `@@SERVER_NAME@@` | `hostname -s` | cosmetic, iPXE menu titles |
+| `@@ANSWER_DIR@@` | `/srv/pxe/answers` | the answer server's store |
+| `@@SURVEY_DIR@@` | `/srv/pxe/surveys` | where `POST /survey` files disk inventories |
+| `@@ANSWER_PORT@@` | `8080` | the answer server's port |
 
 ## Adding another image
 

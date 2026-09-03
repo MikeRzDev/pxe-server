@@ -339,13 +339,78 @@ host only, never in git.
 - **Disks**: the default `disk: auto` emits `filter.DEVNAME = "*"`, resolved on
   the machine — so a single-disk PC installs correctly whether its disk is
   `sda` or `nvme0n1`, with no need to inspect it first.
-  **On a machine with more than one disk that is ambiguous** and which one ext4
-  picks is undocumented. Identify it first and pin it:
+  **On a machine with more than one disk that is ambiguous**, and which one ext4
+  picks is undocumented. See the next section.
 
-  ```bash
-  sudo pxectl rescue        # netboot the target, then run: lsblk
-  ./new-node.py pve01 --disk nvme0n1
-  ```
+## Choosing the disk on a multi-disk machine
+
+`auto` is wrong here, and so, more subtly, is naming the device. Kernel names
+are assigned in probe order: the disk you looked at as `sdb` can come up as
+`sde` on the boot that actually installs. On a machine that still holds another
+OS, that is the difference between wiping a spare disk and wiping everything.
+
+**Select by serial instead.** It is the same on every boot.
+
+**1. Look at what is in the machine.** From a SystemRescue netboot
+(`sudo pxectl rescue`, then at the target's shell):
+
+```bash
+curl -s http://<pxe-server>/tools/disk-survey.sh | bash -s -- --post
+```
+
+It prints every disk with its size, model, serial, partition labels, used and
+free space, and flags any disk carrying NTFS or an EFI System Partition as one
+to keep rather than install to. `--post` also files the report on the PXE
+server, in `/srv/pxe/surveys/<mac>.txt`, so it can be read from there instead of
+off the target's monitor.
+
+If the machine currently runs Windows there is no need to reboot it at all —
+run `tools/disk-survey.ps1` in an elevated PowerShell for the same report.
+
+**2. Enrol with the serial the survey printed:**
+
+```bash
+~/scripts/onboard-node.sh pve01 --disk-serial S3Z9NB0M123456
+```
+
+which emits
+
+```toml
+[disk-setup]
+filesystem = "ext4"
+filter.ID_SERIAL_SHORT = "S3Z9NB0M123456"
+filter-match = "all"
+```
+
+`--disk-filter KEY=GLOB[,KEY=GLOB]` takes any udev property when a serial is not
+enough (`--disk-filter ID_MODEL=Samsung*,ID_BUS=nvme --filter-match all`), and
+`--disk <name>` still works when you have just looked and are installing right
+away. `--disk` and `--disk-filter` are mutually exclusive — the installer
+accepts `disk-list` or `filter.*`, never both — and for `ext4`/`xfs` the
+selection must resolve to **exactly one** disk.
+
+The choice is recorded as `NODE_DISK=` in `secrets/<name>/credentials.env`,
+because after the fact nothing else on the machine can tell you which disk was
+erased.
+
+### Dual-booting: keeping Windows
+
+Installing to a second disk leaves the Windows one untouched, but Proxmox's
+GRUB will not offer it. Afterwards, from the Mac:
+
+```bash
+ssh -i ~/Documents/DevOps/Manhattan/<node>/id_ed25519 root@<ip> \
+    'bash -s' < tools/add-windows-boot-entry.sh
+```
+
+It finds the Windows Boot Manager on whichever ESP has one, writes a single
+static `menuentry` into `/etc/grub.d/40_custom` keyed on that partition's
+filesystem UUID, and runs `update-grub`. Pass `--dry-run` to see it first.
+
+**Do not use `os-prober` for this on a Proxmox host.** It mounts every block
+device it can find, guests' LVM volumes and disk images included, which is a way
+to corrupt a running VM while regenerating a boot menu. Proxmox ships without it
+deliberately.
 
 ## If it doesn't boot
 

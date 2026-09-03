@@ -56,6 +56,11 @@ DEFAULTS = {
     "mailto": "",
     "filesystem": "ext4",
     "disk": "auto",
+    # A udev filter, "KEY=GLOB[,KEY=GLOB...]", selecting the target disk by a
+    # property that survives a reboot instead of by kernel device name. Empty
+    # means fall back to "disk". See disk_section() for why this exists.
+    "disk_filter": "",
+    "filter_match": "all",
     "ip_range": "",
     "ssh_key": "",
     "product": "pve",
@@ -246,7 +251,8 @@ def load_env_file(path):
         "NODE_TIMEZONE": "timezone", "NODE_COUNTRY": "country",
         "NODE_KEYBOARD": "keyboard", "NODE_MAILTO": "mailto",
         "NODE_CIDR_BITS": "cidr_bits", "NODE_DISKS": "disk", "NODE_FS": "filesystem",
-        "NODE_SSH_KEY": "ssh_key",
+        "NODE_SSH_KEY": "ssh_key", "NODE_DISK_FILTER": "disk_filter",
+        "NODE_FILTER_MATCH": "filter_match",
     }
     cfg = {mapped[k]: v for k, v in out.items() if k in mapped}
     if "NODE_IP_START" in out and "NODE_IP_END" in out:
@@ -437,11 +443,78 @@ def hash_password(pw):
     return h
 
 
-def disk_section(disk, fs):
-    """ext4/xfs take exactly ONE disk: disk-list = ["sda","nvme0n1"] is rejected
-    with 'make sure to define only one disk for ext4 and xfs'. A UDEV filter is
-    resolved on the target instead, so "auto" installs to whatever the single
-    disk is called. That is ambiguous on a multi-disk box - name it there."""
+def parse_disk_filter(spec):
+    """'ID_SERIAL_SHORT=ABC123,ID_BUS=ata' -> [('ID_SERIAL_SHORT', 'ABC123'), ...]
+
+    Kept as an ordered list rather than a dict so the emitted TOML reads in the
+    order it was given, and so a repeated key is caught instead of silently
+    winning. The value is a glob, matched by the installer against the udev
+    properties of each block device.
+    """
+    pairs, seen = [], set()
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, val = item.partition("=")
+        key, val = key.strip(), val.strip()
+        if not sep or not key or not val:
+            die(f"--disk-filter: expected KEY=GLOB, got '{item}'\n"
+                f"       e.g. --disk-filter ID_SERIAL_SHORT=S3Z9NB0M12345")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            die(f"--disk-filter: '{key}' is not a udev property name")
+        if key in seen:
+            die(f"--disk-filter: '{key}' given twice - the installer takes one "
+                f"glob per property")
+        seen.add(key)
+        pairs.append((key, val))
+    if not pairs:
+        die("--disk-filter: nothing to match on")
+    return pairs
+
+
+def disk_section(disk, fs, disk_filter="", filter_match="all"):
+    """Emit [disk-setup]'s target selection.
+
+    The installer accepts EITHER 'disk-list' (kernel device names) OR
+    'filter.<UDEV_KEY>' globs, never both - and ext4/xfs take exactly ONE disk:
+    disk-list = ["sda","nvme0n1"] is rejected with 'make sure to define only
+    one disk for ext4 and xfs'.
+
+    Three ways to say which disk, in increasing order of how much the machine
+    has to be trusted to name its own hardware the same way twice:
+
+      disk_filter   a udev filter you chose deliberately, e.g. the disk's
+                    serial. Kernel device names are assigned in probe order, so
+                    on a MULTI-DISK box today's sdb can be tomorrow's sde -
+                    this is the only form that cannot pick the wrong disk after
+                    a reboot, and the only one to use when the machine has
+                    something on it worth keeping. ~/scripts/disk-survey.sh
+                    (or tools/disk-survey.ps1 on Windows) prints the exact flag.
+      disk          an explicit device name. Fine when you have just looked.
+      "auto"        filter.DEVNAME = "*", resolved on the target, so a
+                    single-disk PC installs correctly whether its disk is
+                    called sda or nvme0n1. AMBIGUOUS on a multi-disk machine.
+    """
+    if disk_filter:
+        if disk and disk != "auto":
+            die(f"--disk and --disk-filter are mutually exclusive "
+                f"(got disk='{disk}'), because the installer accepts either\n"
+                f"       'disk-list' or 'filter.*' but refuses both at once.")
+        if filter_match not in ("any", "all"):
+            die(f"--filter-match must be 'any' or 'all', got '{filter_match}'")
+        pairs = parse_disk_filter(disk_filter)
+        lines = [
+            "# Selected by udev property, NOT by device name: kernel names are",
+            "# assigned in probe order and can move between boots on a multi-disk",
+            "# machine. This must match EXACTLY ONE disk for ext4/xfs.",
+        ]
+        lines += [f'filter.{k} = "{v}"' for k, v in pairs]
+        # Only meaningful with several properties, and the installer defaults to
+        # "any" - which on a multi-disk box is the dangerous direction, so it is
+        # always stated rather than left implicit.
+        lines.append(f'filter-match = "{filter_match}"')
+        return "\n".join(lines)
     if disk == "auto":
         return ('# Resolved on the target: installs to whatever the single disk is\n'
                 '# called (sda, nvme0n1, ...). Ambiguous on a MULTI-disk machine.\n'
@@ -451,6 +524,20 @@ def disk_section(disk, fs):
         die(f"filesystem '{fs}' takes exactly one disk, got: {disk}\n"
             f"       use filesystem 'zfs' for several, or name a single disk.")
     return "disk-list  = [" + ", ".join(f'"{d}"' for d in disks) + "]"
+
+
+def disk_selection_summary(cfg):
+    """One line describing what the answer file will install to, for the
+    operator's confirmation and for credentials.env. On a machine with data on
+    other disks this is the single most important thing to be able to read back
+    later, so it is recorded next to the password rather than only printed."""
+    if cfg.get("disk_filter"):
+        pairs = parse_disk_filter(cfg["disk_filter"])
+        joined = " ".join(f"{k}={v}" for k, v in pairs)
+        return f"udev-filter[{cfg.get('filter_match', 'all')}] {joined}"
+    if cfg.get("disk", "auto") == "auto":
+        return "auto (the machine's only disk)"
+    return f"device {cfg['disk']}"
 
 
 def snapshot_secrets(reason):
@@ -537,7 +624,8 @@ filter.ID_NET_NAME_MAC = "*"
 
 [disk-setup]
 filesystem = "{cfg['filesystem']}"
-{disk_section(cfg['disk'], cfg['filesystem'])}
+{disk_section(cfg['disk'], cfg['filesystem'],
+              cfg.get('disk_filter', ''), cfg.get('filter_match', 'all'))}
 """
 
     if dry_run:
@@ -558,6 +646,11 @@ filesystem = "{cfg['filesystem']}"
             f"NODE_URL=https://{ip}:{ui_port}\nNODE_USER=root@pam\n"
             f"NODE_PASSWORD={password}\nNODE_PASSWORD_HASH={pw_hash}\n"
             f"NODE_SSH_KEY={os.path.join(ndir, 'id_ed25519')}\n"
+            # Which disk this node was installed to. On a machine that still
+            # holds another OS, "which one did we wipe" is not answerable after
+            # the fact from anywhere else, so it is kept beside the password.
+            f"NODE_DISK={disk_selection_summary(cfg)}\n"
+            f"NODE_FS={cfg['filesystem']}\n"
             f"# ssh -i {os.path.join(ndir, 'id_ed25519')} root@{ip}\n")
     print(f"    password + key -> secrets/{name}/ (0700)")
 
@@ -677,7 +770,15 @@ def interactive(cfg):
 
     print()
     cfg["filesystem"] = ask("filesystem (ext4/xfs/zfs/btrfs)", cfg["filesystem"])
-    cfg["disk"] = ask("disk ('auto' = whatever the single disk is called)", cfg["disk"])
+    print("\n  Target disk. On a machine with MORE THAN ONE disk, answer the udev")
+    print("  filter prompt instead - device names move between boots, serials do not.")
+    print("  Run disk-survey.sh (or disk-survey.ps1 on Windows) to get the exact value.")
+    cfg["disk_filter"] = ask("udev filter (KEY=GLOB, blank to select by device name)",
+                             cfg.get("disk_filter", ""))
+    if not cfg["disk_filter"]:
+        cfg["disk"] = ask("disk ('auto' = whatever the single disk is called)", cfg["disk"])
+    else:
+        cfg["disk"] = "auto"
     cfg["mailto"] = ask("admin email", cfg["mailto"])
     return [{"name": name}], cfg
 
@@ -696,6 +797,15 @@ def main():
     ap.add_argument("--dns")
     ap.add_argument("--domain")
     ap.add_argument("--disk", help="'auto', a name, or a comma list (zfs/btrfs only)")
+    ap.add_argument("--disk-filter", dest="disk_filter", metavar="KEY=GLOB[,KEY=GLOB]",
+                    help="select the target disk by udev property instead of by "
+                         "device name, e.g. ID_SERIAL_SHORT=S3Z9NB0M12345. Survives "
+                         "reboots; use this on any machine with more than one disk. "
+                         "Mutually exclusive with --disk.")
+    ap.add_argument("--disk-serial", metavar="SERIAL",
+                    help="shorthand for --disk-filter ID_SERIAL_SHORT=<SERIAL>")
+    ap.add_argument("--filter-match", dest="filter_match", choices=("any", "all"),
+                    help="how several --disk-filter properties combine (default: all)")
     ap.add_argument("--fs", dest="filesystem", help="ext4|xfs|zfs|btrfs")
     ap.add_argument("--mailto")
     ap.add_argument("--product", choices=sorted(PRODUCTS),
@@ -727,10 +837,33 @@ def main():
     else:
         nodes, cfg = interactive(cfg)
 
+    # --disk-serial is sugar, resolved before the generic copy below so that an
+    # explicit --disk-filter on the same command line is a conflict rather than
+    # a silent overwrite in whichever order the loop happens to run.
+    if args.disk_serial:
+        if args.disk_filter:
+            die("--disk-serial and --disk-filter both given - --disk-serial is "
+                "just shorthand for --disk-filter ID_SERIAL_SHORT=<serial>")
+        args.disk_filter = f"ID_SERIAL_SHORT={args.disk_serial}"
+
     for k in ("ip_range", "gateway", "dns", "domain", "disk", "filesystem", "mailto",
-              "product"):
+              "product", "disk_filter", "filter_match"):
         if getattr(args, k, None):
             cfg[k] = getattr(args, k)
+
+    if args.disk_filter:
+        # Caught here rather than left to disk_section(), so the conflict is
+        # reported before the run prints what it is about to erase.
+        if args.disk:
+            die(f"--disk and --disk-filter are mutually exclusive (got --disk "
+                f"{args.disk}): the installer accepts 'disk-list' or 'filter.*', "
+                f"never both.")
+        # An explicit filter also overrides a NODE_DISKS default inherited from
+        # nodes.env, which would otherwise trip the same check for something
+        # the caller never asked for.
+        cfg["disk"] = "auto"
+        # Parsed now so a malformed filter fails before any password is minted.
+        parse_disk_filter(cfg["disk_filter"])
 
     # Nothing is created until every address is known to be usable.
     resolved = preflight(nodes, cfg, args)
@@ -738,6 +871,7 @@ def main():
     ok = True
     for name, node_cfg, ip in resolved:
         print(f"==> {name}")
+        print(f"    WIPES: {disk_selection_summary(node_cfg)}  ({node_cfg['filesystem']})")
         answer_file = write_node(node_cfg, name, ip, dry_run=args.dry_run)
         if answer_file and args.serve:
             serve_answer(answer_file, name, node_cfg.get("mac") or args.mac,

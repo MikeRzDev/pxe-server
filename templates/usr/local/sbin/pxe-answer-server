@@ -22,6 +22,11 @@ because the installer uses POST and nginx answers a POST for a static file
 with 405. Working around that needs `error_page 405 =200 $uri;` AND still
 leaves every machine getting the same file - which defeats the point.
 
+One other route exists: POST /survey, which stores a disk inventory sent by
+tools/disk-survey.sh into @@SURVEY_DIR@@. The installer's own POST says nothing
+whatsoever about the machine's disks, so on a multi-disk box that report is the
+only way to find out what is in there before something irreversible happens.
+
 Deliberately plain HTTP on the LAN, matching the rest of this server. Note the
 answer contains the root password hash, so anyone on the LAN who can guess a
 MAC can read that hash - the same exposure as the initrd itself.
@@ -32,9 +37,14 @@ import logging
 import os
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ANSWER_DIR = os.environ.get("PXE_ANSWER_DIR", "@@ANSWER_DIR@@")
+# Where POST /survey drops disk inventories from machines that have not been
+# installed yet. Separate from ANSWER_DIR, which is read-only to this service
+# and scanned for *.toml - see the survey handler for why this exists at all.
+SURVEY_DIR = os.environ.get("PXE_SURVEY_DIR", "@@SURVEY_DIR@@")
 PORT = int(os.environ.get("PXE_ANSWER_PORT", "@@ANSWER_PORT@@"))
 BIND = os.environ.get("PXE_ANSWER_BIND", "0.0.0.0")
 MAX_BODY = 1 << 20  # 1 MiB; the real payload is a few KB
@@ -130,6 +140,33 @@ class Handler(BaseHTTPRequestHandler):
         log.info("GET %s -> %s (default, no MAC)", self.path, os.path.basename(path))
         return self._send(200, body, "application/toml")
 
+    def _save_survey(self, raw):
+        """Store a disk inventory POSTed by tools/disk-survey.sh.
+
+        The Proxmox installer's own POST describes the machine's DMI and NICs
+        and NOTHING about its disks, so on a multi-disk box there is no way to
+        learn what is in there from this server alone - the operator has to go
+        and look. This endpoint is where looking gets written down: boot
+        SystemRescue, pipe disk-survey.sh at it, and the report is on the PXE
+        server instead of on a monitor nobody can read from here.
+
+        Named by MAC when the reporter knows it, else by address and time.
+        """
+        mac = norm_mac(self.headers.get("X-Survey-Mac") or "")
+        stem = mac if len(mac) == 12 else \
+            f"{self.address_string().replace(':', '-')}-{int(time.time())}"
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", stem) + ".txt"
+        path = os.path.join(SURVEY_DIR, name)
+        try:
+            os.makedirs(SURVEY_DIR, mode=0o755, exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(raw)
+        except OSError as exc:
+            log.error("could not store survey from %s: %s", self.address_string(), exc)
+            return self._send(500, b"could not store survey\n")
+        log.info("SURVEY from %s (%d bytes) -> %s", self.address_string(), len(raw), path)
+        return self._send(200, f"stored {path}\n".encode())
+
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -139,6 +176,12 @@ class Handler(BaseHTTPRequestHandler):
             log.warning("rejecting oversized body (%d bytes) from %s", length, self.address_string())
             return self._send(413, b"payload too large\n")
         raw = self.rfile.read(length) if length else b""
+
+        # Answered before any MAC parsing: a survey is plain text from a rescue
+        # shell, not the installer's JSON, and must never be mistaken for a
+        # request for a disk-wiping answer file.
+        if self.path.rstrip("/") == "/survey":
+            return self._save_survey(raw)
 
         macs = []
         try:
@@ -171,6 +214,7 @@ def main():
     if not os.path.isdir(ANSWER_DIR):
         log.warning("%s does not exist yet - every request will 404 until it does", ANSWER_DIR)
     log.info("serving answers from %s on %s:%d", ANSWER_DIR, BIND, PORT)
+    log.info("POST /survey stores disk inventories in %s", SURVEY_DIR)
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 
