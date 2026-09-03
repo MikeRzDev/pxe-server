@@ -72,6 +72,9 @@ for _n in /sys/class/net/*; do
     break
 done
 
+# SystemRescue creates /var/autorun before running this, but if it ever did
+# not, the redirect below would fail and take the whole survey with it.
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
 exec > >(tee -a "$LOG") 2>&1
 
 echo ""
