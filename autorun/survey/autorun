@@ -7,18 +7,38 @@
 # monitor: power the machine on, walk away, and the report appears on the PXE
 # server.
 #
-#   power on  ->  PXE  ->  SystemRescue  ->  this  ->  report POSTed  ->  power off
+#   power on  ->  PXE  ->  SystemRescue  ->  this  ->  report POSTed  ->  REBOOT
 #
 # It touches no disk. SystemRescue runs entirely from RAM and the survey only
 # reads block-device metadata.
 #
-# Do not run this by hand - it powers the machine off when it finishes. Run
+# REBOOT, not power off, is the default on purpose: a machine that powers itself
+# down is only recoverable by someone walking over and pressing the button, and
+# these boards cannot be woken from S5 over the network. Rebooting always leaves
+# the machine reachable. The PXE selection was made from the firmware's ONE-TIME
+# boot menu, so the reboot lands on the normal boot device - Windows, or whatever
+# else was there - rather than netbooting into this again.
+#
+# Override from the kernel cmdline (see boot-survey.ipxe):
+#   survey_after=reboot     default
+#   survey_after=poweroff   only where someone can press the button again
+#   survey_after=stay       leave the rescue shell up
+#
+# Do not run this by hand - it reboots the machine when it finishes. Run
 # tools/disk-survey.sh directly instead.
 
 SERVER="@@SERVER_IP@@"
 SURVEY_URL="http://${SERVER}/tools/disk-survey.sh"
 POST_URL="http://${SERVER}:8080/survey"
 LOG=/var/autorun/survey.log
+
+# What to do when the report has been delivered. Rebooting is the safe default:
+# see the header. Read straight from the cmdline rather than through
+# SystemRescue's config layer, which only maps keys it already knows about.
+AFTER=reboot
+for opt in $(cat /proc/cmdline 2>/dev/null); do
+    case "$opt" in survey_after=*) AFTER="${opt#survey_after=}" ;; esac
+done
 
 exec > >(tee -a "$LOG") 2>&1
 
@@ -55,17 +75,38 @@ fi
 
 echo ""
 if [ "$ok" -eq 1 ]; then
-    echo "==> report delivered. Powering off in 10 seconds."
-    echo "    (Ctrl-C now if you want to keep this rescue shell.)"
-    sleep 10
-    # -f because there is nothing to shut down cleanly: the root filesystem is
-    # a ramdisk and no disk was ever mounted.
-    poweroff -f
+    case "$AFTER" in
+        stay)
+            echo "==> report delivered. survey_after=stay - leaving the shell up."
+            ;;
+        poweroff)
+            echo "==> report delivered. Powering off in 20 seconds."
+            echo "    (Ctrl-C now to keep this rescue shell.)"
+            sleep 20
+            # -f: nothing to shut down cleanly. The root filesystem is a ramdisk
+            # and no disk was ever mounted.
+            poweroff -f
+            ;;
+        *)
+            # The wait is not cosmetic. survey-node.sh disarms PXE within a few
+            # seconds of the report landing, and this machine must not come back
+            # around before that has happened - if it did, and the firmware were
+            # set to netboot by default rather than by a one-time menu choice, it
+            # would survey itself in a loop.
+            echo "==> report delivered. Rebooting in 20 seconds."
+            echo "    The PXE server disarms itself as soon as the report lands, so"
+            echo "    this comes back up on its normal boot device (Windows, etc)."
+            echo "    (Ctrl-C now to keep this rescue shell.)"
+            sleep 20
+            reboot -f
+            ;;
+    esac
 else
     # Deliberately stays up. The report is on this screen and nowhere else, so
     # powering off here would throw away the only copy and the trip it took to
     # get it.
     echo "!! THE REPORT WAS NOT DELIVERED TO THE SERVER."
-    echo "   Leaving this machine powered on so the output above can be read."
+    echo "   Leaving this machine UP so the output above can be read - neither"
+    echo "   rebooting nor powering off, because this screen is the only copy."
     echo "   Log: $LOG"
 fi

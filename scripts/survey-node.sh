@@ -11,8 +11,10 @@
 # this server has no DHCP rules for and never answers.
 #
 # NOTHING IS WRITTEN TO THE TARGET. SystemRescue runs entirely from RAM, the
-# survey only reads block-device metadata, and the machine powers itself off
-# when the report has been delivered. This is the one payload that is safe to
+# survey only reads block-device metadata, and the machine REBOOTS once the
+# report has been delivered - it does not power off, because a machine that
+# powers itself down needs someone to go and press the button, and these boards
+# cannot be woken from S5. This is the one payload that is safe to
 # point at a machine whose contents you care about - which is the whole point,
 # because it is what you run BEFORE deciding which disk the installer may erase.
 #
@@ -72,7 +74,7 @@ Nothing else to do. It will:
     netboot SystemRescue into RAM   (~1-2 min, nothing written to disk)
     inventory every disk it can see
     POST the report back here
-    power itself off
+    REBOOT, back onto its normal boot device
 
 Waiting up to $WAIT_MINS min...
 
@@ -88,7 +90,9 @@ while [ "$SECONDS" -lt "$DEADLINE" ]; do
                | awk '{print $1}' | tail -1)"
         [ -n "$NEW" ] && break
     fi
-    sleep 5
+    # Polled tightly on purpose: the target reboots ~20s after it reports, and
+    # PXE must be disarmed before it comes back around.
+    sleep 2
 done
 
 if [ -z "$NEW" ]; then

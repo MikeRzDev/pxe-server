@@ -359,7 +359,8 @@ OS, that is the difference between wiping a spare disk and wiping everything.
 
 Then power the target on via its UEFI **PXE IPv4** entry and walk away. It
 netboots SystemRescue into RAM, inventories every disk, POSTs the report back
-and powers itself off; `survey-node.sh` prints the report and disarms PXE.
+and **reboots** (not powers off - that would need someone to press the button
+again); `survey-node.sh` prints the report and disarms PXE.
 **Nothing is written to the target** — SystemRescue runs entirely from RAM and
 the survey only reads block-device metadata. Reports are kept at
 `/srv/pxe/surveys/<mac>.txt`.

@@ -92,7 +92,7 @@ the workers running — see the last section for why.
 | `templates/srv/pxe/http/boot-EXAMPLE.ipxe` | starting point for a new image, with cmdline recipes |
 | `templates/usr/local/sbin/pxectl` | the control script |
 | `scripts/` | the `~/scripts` wrappers installed for the operator |
-| `templates/srv/pxe/http/boot-survey.ipxe` | read-only payload: netboots SystemRescue, surveys the disks, reports back, powers off |
+| `templates/srv/pxe/http/boot-survey.ipxe` | read-only payload: netboots SystemRescue, surveys the disks, reports back, reboots |
 | `autorun/survey/autorun` | what that payload runs, fetched via SystemRescue's `ar_source=` |
 | `scripts/survey-node.sh` | arms the survey payload, waits for the report, prints it, disarms |
 | `tools/disk-survey.sh` | run on a TARGET (SystemRescue or any Linux): every disk with serial, labels, free space, and a verdict on which are safe to wipe |
