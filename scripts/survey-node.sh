@@ -4,6 +4,7 @@
 #     ~/scripts/survey-node.sh
 #     ~/scripts/survey-node.sh --wait 30      # minutes to wait (default 20)
 #     ~/scripts/survey-node.sh --keep-armed   # surveying several machines
+#     ~/scripts/survey-node.sh --shadow       # target behind the LAN router
 #
 # Arms the read-only `survey` payload, waits for a machine to netboot and
 # report, prints the report, and disarms. Then power the target on, set to boot
@@ -33,12 +34,18 @@ SURVEY_DIR="${PXE_SURVEY_DIR:-/srv/pxe/surveys}"
 GO_DIR="${PXE_GO_DIR:-/srv/pxe/http/go}"
 WAIT_MINS=20
 KEEP_ARMED=0
+# See tools/dhcp-offer-shadow.py: only needed for a target on the far side of a
+# router that eats client DHCP broadcasts, so this server never hears it ask.
+SHADOW_BIN="$HOME/pxe-server/tools/dhcp-offer-shadow.py"
+SHADOW=0
+SHADOW_PID=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --wait)       WAIT_MINS="${2:?--wait needs minutes}"; shift 2 ;;
+        --shadow)     SHADOW=1; shift ;;
         --keep-armed) KEEP_ARMED=1; shift ;;
-        -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "survey-node.sh: unknown argument '$1'" >&2; exit 1 ;;
     esac
 done
@@ -71,6 +78,21 @@ fi
 
 echo "==> arming the read-only survey payload"
 sudo -A -A pxectl survey || exit 1
+
+if [ "$SHADOW" -eq 1 ]; then
+    if [ -x "$SHADOW_BIN" ]; then
+        sudo -A -A setsid "$SHADOW_BIN" --timeout "$WAIT_MINS" \
+            </dev/null >/tmp/dhcp-offer-shadow.log 2>&1 &
+        SHADOW_PID=$!
+        echo "==> shadowing the router's DHCP offers (pid $SHADOW_PID)"
+        echo "    log: /tmp/dhcp-offer-shadow.log"
+        # The shadow has its own --timeout, so a killed shell cannot leave the
+        # NIC promiscuous for ever - but tidy up on the way out regardless.
+        trap 'sudo -A -A kill "$SHADOW_PID" 2>/dev/null || true' EXIT
+    else
+        echo "==> --shadow: $SHADOW_BIN is missing; carrying on without it" >&2
+    fi
+fi
 
 BEFORE="$(snapshot_existing)"
 

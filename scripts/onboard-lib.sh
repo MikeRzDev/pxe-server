@@ -69,6 +69,9 @@ GO_DIR="${PXE_GO_DIR:-/srv/pxe/http/go}"
 # power a machine on, which is a different timescale from waiting for an
 # already-booting machine to reach the installer.
 WAIT_SECS="${PXE_WAIT_SECS:-900}"
+# tools/dhcp-offer-shadow.py - only needed for a target the Pi cannot hear.
+SHADOW_BIN="$HOME/pxe-server/tools/dhcp-offer-shadow.py"
+SHADOW_PID=""
 
 norm_mac() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd '0-9a-f'; }
 
@@ -254,11 +257,13 @@ onboard_main() {
         echo "  $self node06 --mac 84:47:09:70:9c:11      # straight to the installer, no race at all" >&2
         echo "  $self node06 --any-mac                    # wildcard, auto-narrowed - rarely needed" >&2
         echo "  $self node06 --two-pass                   # old flow: second manual reboot" >&2
+        echo "  $self node06 --shadow                     # target the Pi cannot hear (behind the router)" >&2
         return 1
     fi
 
     local name="$1"; shift
     local mode=survey mac="" keep_armed=0 chain=0 want_serial="" resurvey=0 report=""
+    local shadow="${PXE_SHADOW:-0}"
     local passthru=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -275,6 +280,7 @@ onboard_main() {
             # against what the machine actually reports before being used.
             --disk-serial) want_serial="${2:?--disk-serial needs a serial}"; passthru+=("$1" "$2"); shift 2 ;;
             --keep-armed) keep_armed=1;  shift ;;
+            --shadow)     shadow=1;      shift ;;
             *)            passthru+=("$1"); shift ;;
         esac
     done
@@ -284,7 +290,35 @@ onboard_main() {
     # which is what macOS ships. The plain form works on the Pi (bash 5) and
     # blows up the moment anyone runs these scripts anywhere else.
 
+    # --shadow: for a target on the far side of a router that eats client DHCP
+    # broadcasts, so dnsmasq never hears its DISCOVER and never answers. The
+    # shadow answers instead, working off the router's OFFER - the half of the
+    # conversation that does arrive. Harmless where it is not needed, since a
+    # client that takes its offer lands on the same iPXE either way, but it
+    # puts the NIC into promiscuous mode, so it is opt-in rather than always-on.
+    _shadow_start() {
+        [ "$shadow" -eq 1 ] || return 0
+        if [ ! -x "$SHADOW_BIN" ]; then
+            echo "==> --shadow: $SHADOW_BIN is missing; carrying on without it" >&2
+            return 0
+        fi
+        local args=(--timeout "$(( (WAIT_SECS + 59) / 60 ))")
+        [ -n "$mac" ] && args+=(--mac "$mac")
+        sudo -A -A setsid "$SHADOW_BIN" "${args[@]}" \
+            </dev/null >/tmp/dhcp-offer-shadow.log 2>&1 &
+        SHADOW_PID=$!
+        echo "==> shadowing the router's DHCP offers for this wait (pid $SHADOW_PID)"
+        echo "    log: /tmp/dhcp-offer-shadow.log"
+    }
+
+    _shadow_stop() {
+        [ -n "$SHADOW_PID" ] || return 0
+        sudo -A -A kill "$SHADOW_PID" 2>/dev/null || true
+        SHADOW_PID=""
+    }
+
     _disarm() {
+        _shadow_stop
         [ "$keep_armed" -eq 1 ] && { echo "==> leaving PXE armed (--keep-armed)"; return; }
         echo "==> disarming PXE (the install no longer needs it)"
         "$HOME/scripts/pxe-stop.sh" >/dev/null 2>&1 || true
@@ -314,6 +348,11 @@ MSG
     }
 
     local since
+
+    # Started once, before any mode arms anything: every mode below ends in
+    # waiting for a machine to netboot, and that is the wait the shadow exists
+    # to make possible. _disarm stops it again on every exit path.
+    _shadow_start
 
     # ----------------------------------------------------- two-pass (old) --
     if [ "$mode" = twopass ]; then

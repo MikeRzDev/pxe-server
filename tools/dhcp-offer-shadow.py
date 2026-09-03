@@ -62,6 +62,7 @@ with nothing running here at all.
 """
 
 import argparse
+import fcntl
 import os
 import re
 import signal
@@ -71,6 +72,11 @@ import subprocess
 import sys
 import time
 
+ETH_P_IP = 0x0800
+SIOCGIFFLAGS = 0x8913
+SIOCSIFFLAGS = 0x8914
+IFF_PROMISC = 0x100
+
 DHCP_MAGIC = b'\x63\x82\x53\x63'
 BOOTREPLY = 2
 DHCPOFFER = 2
@@ -79,6 +85,64 @@ BROADCAST_FLAG = 0x8000
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+class Promiscuous:
+    """Put the interface into promiscuous mode, and take it back out.
+
+    Binding a packet socket is not enough on its own: a switch only floods
+    broadcast and unknown-unicast to this port, so an OFFER unicast to a client
+    on the far segment is seen only while promiscuous. Restored on exit so this
+    leaves the interface as it found it.
+    """
+
+    def __init__(self, iface):
+        self.iface = iface
+        self.was_on = False
+        self.sock = None
+
+    def _flags(self, sock, set_to=None):
+        ifreq = struct.pack('16sh', self.iface.encode(), 0)
+        cur = struct.unpack('16sh', fcntl.ioctl(sock, SIOCGIFFLAGS, ifreq))[1]
+        if set_to is not None:
+            fcntl.ioctl(sock, SIOCSIFFLAGS,
+                        struct.pack('16sh', self.iface.encode(), set_to))
+        return cur
+
+    def on(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        flags = self._flags(self.sock)
+        self.was_on = bool(flags & IFF_PROMISC)
+        if not self.was_on:
+            self._flags(self.sock, flags | IFF_PROMISC)
+
+    def off(self):
+        if self.sock is None or self.was_on:
+            return
+        try:
+            flags = self._flags(self.sock)
+            self._flags(self.sock, flags & ~IFF_PROMISC)
+        except OSError:
+            pass
+
+
+def udp_payload(frame):
+    """Strip Ethernet/IP/UDP off a captured frame; None if it is not DHCP."""
+    if len(frame) < 14 + 20 + 8:
+        return None
+    if struct.unpack('!H', frame[12:14])[0] != ETH_P_IP:
+        return None                                  # not IPv4 (VLAN, ARP, v6)
+    ip = frame[14:]
+    if (ip[0] >> 4) != 4:
+        return None
+    ihl = (ip[0] & 0x0F) * 4
+    if ip[9] != socket.IPPROTO_UDP or len(ip) < ihl + 8:
+        return None
+    sport, dport = struct.unpack('!HH', ip[ihl:ihl + 4])
+    if 67 not in (sport, dport) and 68 not in (sport, dport):
+        return None
+    udp_len = struct.unpack('!H', ip[ihl + 4:ihl + 6])[0]
+    return ip[ihl + 8:ihl + max(8, udp_len)]
 
 
 # ------------------------------------------------------------------ parse ----
@@ -233,20 +297,19 @@ def main():
 
     wanted = {m.lower().replace('-', ':') for m in args.mac}
 
-    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    rx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    try:
-        rx.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                      args.interface.encode())
-    except PermissionError:
-        pass
-    try:
-        rx.bind(('', 68))
-    except OSError as e:
-        sys.exit(f'cannot listen on UDP/68 ({e}). A DHCP client on this host '
-                 f'is probably holding it.')
+    # A packet socket in promiscuous mode, not a UDP socket bound to port 68.
+    # Two reasons, and the second is the one that matters:
+    #   - dnsmasq already owns 0.0.0.0:67, and port 68 may be held by a DHCP
+    #     client on this host;
+    #   - a DHCPOFFER is only broadcast when the client asked for that. If the
+    #     router unicasts it to the client instead, no socket on this machine
+    #     would ever be handed a copy - but the frame still arrives on the
+    #     wire, and this sees it. tcpdump saw these offers; so must we.
+    rx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_IP))
+    rx.bind((args.interface, 0))
     rx.settimeout(1.0)
+    promisc = Promiscuous(args.interface)
+    promisc.on()
 
     tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
     tx.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
@@ -270,7 +333,12 @@ def main():
   Ctrl-C to stop.
 """, flush=True)
 
-    signal.signal(signal.SIGINT, lambda *_: sys.exit('\nstopped.'))
+    def _bye(*_):
+        promisc.off()
+        sys.exit('\nstopped.')
+
+    signal.signal(signal.SIGINT, _bye)
+    signal.signal(signal.SIGTERM, _bye)
     deadline = time.time() + args.timeout * 60 if args.timeout else None
     seen = {}
     shadowed = 0
@@ -278,10 +346,15 @@ def main():
     while True:
         if deadline and time.time() > deadline:
             log(f'timed out after {args.timeout} min; shadowed {shadowed}.')
+            promisc.off()
             return 1 if shadowed == 0 else 0
         try:
-            data, addr = rx.recvfrom(2048)
+            frame_in = rx.recv(2048)
         except socket.timeout:
+            continue
+
+        data = udp_payload(frame_in)
+        if data is None:
             continue
 
         pkt = parse_dhcp(data)
@@ -332,6 +405,7 @@ def main():
         if args.once and n >= 1:
             log('shadowed one client (--once). The target should be '
                 'TFTPing now; watch it with:  sudo pxectl log')
+            promisc.off()
             return 0
 
 
