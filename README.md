@@ -98,6 +98,37 @@ the workers running — see the last section for why.
 | `tools/disk-survey.sh` | run on a TARGET (SystemRescue or any Linux): every disk with serial, labels, free space, and a verdict on which are safe to wipe |
 | `tools/disk-survey.ps1` | the same report from an elevated PowerShell, for a target still running Windows |
 | `tools/add-windows-boot-entry.sh` | run on a node AFTER install: adds a Windows entry to its GRUB menu, without os-prober |
+| `tools/dhcp-offer-shadow.py` | netboot a target this server cannot hear — see **Reaching the target** below |
+| `tools/pxe-boot-from-windows.ps1` | run on a target still running Windows: installs the chainloader on its own ESP and sets a one-shot BootNext, so no PXE discovery is needed at all |
+| `scripts/pick-disk.sh` | interactive menu over a survey report; pick a disk by number, it passes the SERIAL through to enrolment |
+| `payloads/build-ipxe-chain.sh` | builds `ipxe-chain.efi`, an iPXE binary with this server's address compiled in |
+
+### Reaching the target
+
+Proxy-DHCP is **passive**: dnsmasq only ever answers a DISCOVER it actually
+hears, and hands out no addresses of its own. That works when the target shares
+a broadcast domain with this server, and silently does nothing when it does not
+— the firmware waits for boot information nobody sends, with **no entry in any
+log**.
+
+Two mechanisms cover the two cases. They coexist; a client offered both takes
+either and lands on the same iPXE.
+
+| target | mechanism | how |
+|---|---|---|
+| same switch as the server | dnsmasq proxy-DHCP | nothing to do; this is the default |
+| behind another network device | `tools/dhcp-offer-shadow.py` | `onboard-node.sh <name> --shadow` |
+| anywhere reachable by IP, incl. VMs and over a VPN | `ipxe-chain.efi` on the target's own ESP or a USB stick | `tools/pxe-boot-from-windows.ps1`, or copy to `/EFI/BOOT/BOOTX64.EFI` |
+
+The shadow works by answering the DISCOVER it never heard, reconstructed from
+the router's OFFER — which does arrive, and carries the client's transaction ID
+and MAC. It sends the reply three ways (L2 broadcast, plus unicast to the
+client's MAC twice); **broadcast alone is not enough**, because consumer routers
+commonly drop DHCP *server* traffic arriving from a LAN port. That was measured,
+not assumed.
+
+The third row needs no DHCP cooperation whatsoever and is the direction the
+design is moving — see `docs/specs/rescue-ssh-enrolment.md`.
 
 Payloads are **not** in here — a 2 GB initrd and a 1.7 GB ISO do not belong in
 version control. `payloads/` rebuilds them from upstream instead.

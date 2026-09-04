@@ -370,6 +370,32 @@ free space, and flags any disk carrying NTFS or an EFI System Partition as one
 to keep rather than install to. It leads with the machine's MACs, so the
 enrolment that follows can pass `--mac` and skip the discovery race entirely.
 
+Used and free space are read straight from each filesystem's own metadata
+(`ntfsinfo`, `dumpe2fs`, `fsck.fat -n`, `xfs_db -r`) rather than by mounting
+anything — `lsblk`'s `FSUSED`/`FSAVAIL` only ever report on a *mounted*
+filesystem, so on a survey they would all be blank. Reading metadata also works
+on an NTFS volume left dirty by Windows fast startup, which a read-only mount
+would refuse outright.
+
+**2. Pick from a menu rather than retyping a serial.**
+
+```bash
+~/scripts/pick-disk.sh <name>
+```
+
+It prints the reported disks numbered, with how full each one is and a verdict,
+takes a number, asks for the node name typed back to confirm, and passes the
+serial straight through to `onboard-node.sh --chain`. The serial is never
+retyped by a human — a mistyped or stale one names the wrong disk, which is the
+exact failure this whole path exists to prevent. It refuses when stdin is not a
+terminal, warns when the report is older than the 90-minute hold, and refuses a
+disk that reports no serial rather than falling back to a kernel name.
+
+**If the target is not on the same switch as the PXE server**, add `--shadow` to
+`survey-node.sh` and `onboard-node.sh`. Proxy-DHCP is passive and only answers a
+DISCOVER it hears; a target behind another network device is invisible to it and
+will hang with nothing in any log. See "Reaching the target" in `../README.md`.
+
 Two manual variants, when a headless boot is not what you want:
 
 ```bash
