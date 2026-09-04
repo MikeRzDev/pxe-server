@@ -89,6 +89,63 @@ field() {
         | sed "s/^ //; s/^$2=\"//; s/\"$//"
 }
 
+# How full a filesystem is - WITHOUT MOUNTING IT.
+#
+# lsblk's FSUSED/FSAVAIL columns are only ever populated for a filesystem that
+# is currently MOUNTED. This survey deliberately mounts nothing, so on a machine
+# booted into SystemRescue those two columns come back blank for every partition
+# on every disk - and "how much is actually on it" is precisely the number you
+# need when choosing which of seven disks may be erased.
+#
+# The figures live in each filesystem's own metadata, and every command below is
+# a read-only reader of it: ntfsinfo and dumpe2fs only ever read, `fsck.fat -n`
+# answers "no" to every repair prompt, and `xfs_db -r` opens the device
+# read-only. Nothing here mounts, replays a journal, or writes a byte - which
+# matters, because this runs against disks whose contents are the whole point.
+#
+# Reading metadata also works on an NTFS volume left dirty by Windows fast
+# startup, which a read-only mount would refuse outright.
+fs_usage() {   # $1 = device, $2 = fstype  ->  "<used> <free>", or "- -"
+    local dev="$1" fs="$2" info cs tot free frac used_c
+    case "$fs" in
+        ntfs|ntfs3)
+            command -v ntfsinfo >/dev/null || { echo "- -"; return; }
+            info="$(ntfsinfo -m "$dev" 2>/dev/null)" || { echo "- -"; return; }
+            cs="$(printf '%s\n' "$info"   | awk -F': *' '/Cluster Size:/            {print $2; exit}')"
+            tot="$(printf '%s\n' "$info"  | awk -F': *' '/Volume Size in Clusters:/ {print $2; exit}')"
+            free="$(printf '%s\n' "$info" | awk -F': *' '/Free Clusters:/           {print $2; exit}' | awk '{print $1}')"
+            ;;
+        ext2|ext3|ext4)
+            command -v dumpe2fs >/dev/null || { echo "- -"; return; }
+            info="$(dumpe2fs -h "$dev" 2>/dev/null)" || { echo "- -"; return; }
+            cs="$(printf '%s\n' "$info"   | awk -F': *' '/^Block size:/  {print $2; exit}')"
+            tot="$(printf '%s\n' "$info"  | awk -F': *' '/^Block count:/ {print $2; exit}')"
+            free="$(printf '%s\n' "$info" | awk -F': *' '/^Free blocks:/ {print $2; exit}')"
+            ;;
+        vfat|fat|fat12|fat16|fat32|msdos)
+            command -v fsck.fat >/dev/null || { echo "- -"; return; }
+            info="$(fsck.fat -n -v "$dev" 2>/dev/null)" || true
+            cs="$(printf '%s\n' "$info" | awk '/bytes per cluster/{print $1; exit}')"
+            # The summary line reads: "<dev>: 1 files, 1/130811 clusters"
+            frac="$(printf '%s\n' "$info" | awk '/files,.*clusters$/{print $(NF-1); exit}')"
+            tot="${frac#*/}"; used_c="${frac%/*}"
+            [ -n "$tot" ] && [ -n "$used_c" ] && free=$((tot - used_c))
+            ;;
+        xfs)
+            command -v xfs_db >/dev/null || { echo "- -"; return; }
+            info="$(xfs_db -r -c 'sb 0' -c 'print dblocks fdblocks blocksize' "$dev" 2>/dev/null)"
+            cs="$(printf '%s\n' "$info"   | awk -F' = ' '/^blocksize/{print $2; exit}')"
+            tot="$(printf '%s\n' "$info"  | awk -F' = ' '/^dblocks/  {print $2; exit}')"
+            free="$(printf '%s\n' "$info" | awk -F' = ' '/^fdblocks/ {print $2; exit}')"
+            ;;
+        *) echo "- -"; return ;;
+    esac
+
+    case "$cs$tot$free" in *[!0-9]*|'') echo "- -"; return ;; esac
+    [ "$tot" -ge "$free" ] 2>/dev/null || { echo "- -"; return; }
+    printf '%s %s\n' "$(human $(( (tot - free) * cs )))" "$(human $(( free * cs )))"
+}
+
 # udev property for a device, empty if absent or if udevadm is unavailable.
 prop() {
     command -v udevadm >/dev/null || return 0
@@ -182,6 +239,14 @@ report() {
             pused="$(field "$line" FSUSED)"
             pavail="$(field "$line" FSAVAIL)"
             pmnt="$(field "$line" MOUNTPOINT)"
+
+            # Nothing is mounted here, so lsblk leaves both blank - read them
+            # out of the filesystem's own metadata instead. See fs_usage().
+            if [ -z "$pused$pavail" ] && [ -n "$pfs" ]; then
+                read -r pused pavail <<<"$(fs_usage "/dev/$pname" "$pfs")"
+                [ "$pused" = "-" ] && pused=""
+                [ "$pavail" = "-" ] && pavail=""
+            fi
 
             case "$pfs" in ntfs|ntfs3) has_ntfs=1 ;; esac
             case "$ptype" in *"EFI System"*) has_esp=1 ;; esac
