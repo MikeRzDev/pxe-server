@@ -178,7 +178,7 @@ _survey_recent() {
 
 # Pull the machine-readable tail out of a report.
 _survey_field() {  # <report-path> <MAC|DISK>
-    sudo -A -A sed -n '/^### SURVEY-DATA v1$/,/^### END SURVEY-DATA$/p' "$1" \
+    sudo -A -A sed -n '/^### SURVEY-DATA v[0-9][0-9]*$/,/^### END SURVEY-DATA$/p' "$1" \
         | awk -v k="$2" -F'\t' '$1==k'
 }
 

@@ -143,7 +143,9 @@ fs_usage() {   # $1 = device, $2 = fstype  ->  "<used> <free>", or "- -"
 
     case "$cs$tot$free" in *[!0-9]*|'') echo "- -"; return ;; esac
     [ "$tot" -ge "$free" ] 2>/dev/null || { echo "- -"; return; }
-    printf '%s %s\n' "$(human $(( (tot - free) * cs )))" "$(human $(( free * cs )))"
+    # BYTES, not a human string: callers add these up per disk, and only the
+    # printing sites format them.
+    printf '%s %s\n' "$(( (tot - free) * cs ))" "$(( free * cs ))"
 }
 
 # udev property for a device, empty if absent or if udevadm is unavailable.
@@ -225,6 +227,10 @@ report() {
         echo "    part table  : ${ptt:-none}"
 
         local part_count=0 has_ntfs=0 has_esp=0 labels="" line
+        # Totals across this disk's filesystems, for the summary and the
+        # machine-readable tail. Kept in bytes so they can be added up;
+        # formatted only at the point of printing.
+        local disk_used_b=0 disk_free_b=0 disk_fs_seen=0
         local out=""
         while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -243,9 +249,16 @@ report() {
             # Nothing is mounted here, so lsblk leaves both blank - read them
             # out of the filesystem's own metadata instead. See fs_usage().
             if [ -z "$pused$pavail" ] && [ -n "$pfs" ]; then
-                read -r pused pavail <<<"$(fs_usage "/dev/$pname" "$pfs")"
-                [ "$pused" = "-" ] && pused=""
-                [ "$pavail" = "-" ] && pavail=""
+                local ub fb
+                read -r ub fb <<<"$(fs_usage "/dev/$pname" "$pfs")"
+                if [ "$ub" = "-" ]; then
+                    pused=""; pavail=""
+                else
+                    pused="$(human "$ub")"; pavail="$(human "$fb")"
+                    disk_used_b=$((disk_used_b + ub))
+                    disk_free_b=$((disk_free_b + fb))
+                    disk_fs_seen=1
+                fi
             fi
 
             case "$pfs" in ntfs|ntfs3) has_ntfs=1 ;; esac
@@ -307,13 +320,20 @@ report() {
         # prose above is for a person; this is so the enrolment flow can tell
         # a single-disk machine (nothing to decide) from one where a human
         # must choose, without parsing English.
-        data="$data$(printf 'DISK\t%s\t%s\t%s\t%s\t%s\t%s' \
+        local used_h="-" free_h="-" used_col="-" free_col="-"
+        if [ "$disk_fs_seen" -eq 1 ]; then
+            used_h="$disk_used_b"; free_h="$disk_free_b"
+            used_col="$(human "$disk_used_b")"; free_col="$(human "$disk_free_b")"
+        fi
+
+        data="$data$(printf 'DISK\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
             "$dev" "${serial:--}" "$size_b" "$(human "$size_b")" \
-            "${model:-unknown}" "$vcode")
+            "${model:-unknown}" "$vcode" "$used_h" "$free_h")
 "
 
-        summary="$summary$(printf '  %-12s %-10s %-24s %-20s %s' \
-            "$dev" "$(human "$size_b")" "${serial:-?}" "${model:0:20}" "$verdict")
+        summary="$summary$(printf '  %-12s %-9s %-9s %-22s %-18s %s' \
+            "$dev" "$(human "$size_b")" "$used_col" "${serial:-?}" \
+            "${model:0:18}" "$verdict")
 "
     done
 
@@ -322,7 +342,7 @@ report() {
     echo " SUMMARY"
     echo "======================================================================"
     echo ""
-    printf '  %-12s %-10s %-24s %-20s %s\n' DEVICE SIZE SERIAL MODEL VERDICT
+    printf '  %-12s %-9s %-9s %-22s %-18s %s\n' DEVICE SIZE USED SERIAL MODEL VERDICT
     printf '%s' "$summary"
     echo ""
     echo "  On the PXE server (arduino):"
@@ -338,7 +358,10 @@ report() {
     # version marker is so a future change to these columns is detected
     # rather than silently misread into a disk selection.
     # ---------------------------------------------------------------------
-    echo "### SURVEY-DATA v1"
+    # v2 appends USED and FREE (bytes, or "-") to each DISK row. Appending is
+    # backwards compatible for a positional reader, but the version still moves,
+    # so a reader can tell what it is looking at rather than guess from width.
+    echo "### SURVEY-DATA v2"
     for nic in /sys/class/net/*; do
         [ -e "$nic/address" ] || continue
         case "$(basename "$nic")" in lo) continue ;; esac
