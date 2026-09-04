@@ -68,6 +68,7 @@ ANSWER_DIR="${ANSWER_DIR:-$PXE_ROOT/answers}"
 # Disk inventories POSTed by tools/disk-survey.sh. Kept apart from ANSWER_DIR
 # because the answer server may only ever WRITE here and only ever READ there.
 SURVEY_DIR="${SURVEY_DIR:-$PXE_ROOT/surveys}"
+GO_DIR="${GO_DIR:-$PXE_ROOT/http/go}"
 ANSWER_PORT="${ANSWER_PORT:-8080}"
 
 for v in IFACE SERVER_IP LAN_CIDR LAN_NET; do
@@ -124,6 +125,7 @@ render() {
         -e "s|@@PXE_HOME@@|$PXE_HOME|g" \
         -e "s|@@ANSWER_DIR@@|$ANSWER_DIR|g" \
         -e "s|@@SURVEY_DIR@@|$SURVEY_DIR|g" \
+        -e "s|@@GO_DIR@@|$GO_DIR|g" \
         -e "s|@@ANSWER_PORT@@|$ANSWER_PORT|g" \
         "$src" > "$tmp"
     if grep -q '@@[A-Z_]*@@' "$tmp"; then
@@ -172,7 +174,9 @@ RUN install -d -o www-data -g "$PXE_USER" -m 0775 "$SURVEY_DIR"
 # Release files for machines held in the survey shell (onboard-node.sh --chain).
 # Under the http root so a held machine can poll for its own MAC over plain
 # HTTP, exactly as it fetched everything else it is running.
-RUN install -d -o "$PXE_USER" -g "$PXE_USER" -m 0755 "$PXE_ROOT/http/go"
+# www-data must be able to unlink a stale release file here - see
+# _clear_stale_release in pxe-answer-server.
+RUN install -d -o www-data -g "$PXE_USER" -m 0775 "$GO_DIR"
 # nginx logs live on a tmpfs on DietPi; the drop-in recreates this at start,
 # but create it now so a manual `nginx -t` before first start also works.
 RUN install -d -o www-data -g adm -m 0755 /var/log/nginx

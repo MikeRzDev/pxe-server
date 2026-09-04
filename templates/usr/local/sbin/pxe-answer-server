@@ -45,6 +45,9 @@ ANSWER_DIR = os.environ.get("PXE_ANSWER_DIR", "@@ANSWER_DIR@@")
 # installed yet. Separate from ANSWER_DIR, which is read-only to this service
 # and scanned for *.toml - see the survey handler for why this exists at all.
 SURVEY_DIR = os.environ.get("PXE_SURVEY_DIR", "@@SURVEY_DIR@@")
+# Release files for machines held in the survey shell. Written by
+# onboard-node.sh --chain; cleared here when a machine reports again.
+GO_DIR = os.environ.get("PXE_GO_DIR", "@@GO_DIR@@")
 PORT = int(os.environ.get("PXE_ANSWER_PORT", "@@ANSWER_PORT@@"))
 BIND = os.environ.get("PXE_ANSWER_BIND", "0.0.0.0")
 MAX_BODY = 1 << 20  # 1 MiB; the real payload is a few KB
@@ -165,7 +168,35 @@ class Handler(BaseHTTPRequestHandler):
             log.error("could not store survey from %s: %s", self.address_string(), exc)
             return self._send(500, b"could not store survey\n")
         log.info("SURVEY from %s (%d bytes) -> %s", self.address_string(), len(raw), path)
+        self._clear_stale_release(mac)
         return self._send(200, f"stored {path}\n".encode())
+
+    def _clear_stale_release(self, mac):
+        """Drop any release file for a machine that is only now reporting.
+
+        A release file tells a held machine to stop waiting and netboot into
+        whatever is armed. It is written AFTER a survey has been read and a disk
+        chosen, so one that is still present when a fresh report arrives cannot
+        belong to this report - it is left over from a previous cycle.
+
+        Leaving it there costs a boot loop, and one that is invisible from the
+        machine's end: it surveys, starts holding, immediately finds the stale
+        release, reboots, and surveys again roughly every two minutes. Observed
+        exactly once, on oppenheimer, from a release file dropped by hand rather
+        than by onboard-node.sh --chain. Nothing is written to the target while
+        it happens, which is precisely why it can run for a long time unnoticed.
+        """
+        if len(mac) != 12:
+            return
+        stale = os.path.join(GO_DIR, f"{mac}.txt")
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            log.warning("could not clear stale release %s: %s", stale, exc)
+            return
+        log.info("cleared stale release file %s (this machine is still surveying)", stale)
 
     def do_POST(self):
         try:

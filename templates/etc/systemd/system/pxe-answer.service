@@ -14,6 +14,9 @@ RestartSec=2
 # so a multi-disk machine can be inspected before it is installed.
 ProtectSystem=strict
 ReadWritePaths=@@SURVEY_DIR@@
+# The service is ProtectSystem=strict, so clearing a stale release file
+# needs this named explicitly or the unlink fails with EROFS.
+ReadWritePaths=@@GO_DIR@@
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
