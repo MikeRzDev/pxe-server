@@ -181,6 +181,18 @@ def mac_str(chaddr):
     return ':'.join(f'{b:02x}' for b in chaddr[:6])
 
 
+def mac_key(mac):
+    """Hex only, so 04:7c:16:49:aa:63 and 047c1649aa63 compare equal.
+
+    Both spellings are in circulation: this prints the colonned form, while
+    onboard-lib.sh and the survey filenames use the bare one. Comparing the two
+    directly never matches, and the failure is silent - every offer is skipped,
+    no error is logged, and the target simply never gets an answer. Cost one
+    enrolment on oppenheimer before it was spotted.
+    """
+    return re.sub(r'[^0-9a-f]', '', mac.lower())
+
+
 # ------------------------------------------------------------------ build ----
 def build_proxy_offer(req, server_ip, bootfile):
     """A ProxyDHCP OFFER that answers the DISCOVER we never saw.
@@ -338,7 +350,7 @@ def main():
     if not server_ip:
         sys.exit(f'could not find an IPv4 address on {args.interface}')
 
-    wanted = {m.lower().replace('-', ':') for m in args.mac}
+    wanted = {mac_key(m) for m in args.mac}
 
     # A packet socket in promiscuous mode, not a UDP socket bound to port 68.
     # Two reasons, and the second is the one that matters:
@@ -410,7 +422,7 @@ def main():
         mac = mac_str(pkt['chaddr'])
         offered = socket.inet_ntoa(pkt['yiaddr'])
 
-        if wanted and mac not in wanted:
+        if wanted and mac_key(mac) not in wanted:
             if args.verbose:
                 log(f'ignoring offer to {mac} ({offered}) - not in --mac')
             continue
